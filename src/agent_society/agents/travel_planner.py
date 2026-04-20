@@ -66,16 +66,20 @@ def _route_aware_hop(agent: Agent, world: World, destination: str) -> str | None
     mid = RISKY_MID if armed else SAFE_MID
 
     # ── Inter-region legs ────────────────────────────────────────────────────
-    # City → Farm (first leg: go through chosen mid)
+    # City → Farm: must exit through city.market (the only city-route junction)
     if cur in CITY_NODES and destination in FARM_NODES:
+        if cur != "city.market":
+            return _next_hop_toward(agent, world, "city.market")
         return mid
     # At route mid heading to farm
     if cur == SAFE_MID and destination in FARM_NODES:
         return "farm.hub"
     if cur == RISKY_MID and destination in FARM_NODES:
         return "farm.hub"
-    # Farm → City (first leg: go through chosen mid)
+    # Farm → City: must exit through farm.hub (the only farm-route junction)
     if cur in FARM_NODES and destination in CITY_NODES:
+        if cur != "farm.hub":
+            return _next_hop_toward(agent, world, "farm.hub")
         return mid
     # At route mid heading to city
     if cur == SAFE_MID and destination in CITY_NODES:

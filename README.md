@@ -28,7 +28,7 @@ python scripts/generate_replay.py
 
 옵션:
 ```bash
-python scripts/generate_replay.py --ticks 2500   # 기본값 (퀘스트 2사이클)
+python scripts/generate_replay.py --ticks 2500   # 기본값 (약 104일, 퀘스트 14사이클)
 python scripts/generate_replay.py --ticks 10000  # 긴 시뮬레이션
 python scripts/generate_replay.py --output output/my_run.html
 python scripts/generate_replay.py --seed 1234
@@ -68,7 +68,7 @@ WorldSnapshot
     ↓
 EventGenerator.tick()    — 자연재해·약탈 이벤트 확률 발생
 AgentSociety.tick()      — needs 감소 → 행동 선택 → 실행
-QuestGenerator.tick()    — 7일(1008 tick)마다: needs 분석 → LLM 서사화
+QuestGenerator.tick()    — 7일(168 tick)마다: needs 분석 → LLM 서사화
 PlayerInterface.tick()   — (M4에서 구현 예정)
 ```
 
@@ -120,7 +120,7 @@ quest_gen = QuestGenerator(MockNarrator())
 
 | 문서 | 내용 |
 |---|---|
-| `PLAN.md` | 마일스톤 현황 (M1 완료, M2 완료, M3 예정) |
+| `PLAN.md` | 마일스톤 현황 (M1 완료, M2 완료, M3 완료) |
 | `ARCHITECTURE.md` | 코드 경계, tick 순서, write 권한 규칙 |
 | `CLAUDE.md` | AI 코드 작성 가이드라인 |
 | `docs/research/` | 선행 연구 조사 문서 |

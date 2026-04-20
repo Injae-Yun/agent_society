@@ -299,9 +299,10 @@ def _select_merchant(agent: Agent, snapshot: WorldSnapshot, rng: Random) -> obje
     if hunger > 0.5 and food:
         scores.append((hunger, ConsumeFoodAction(agent=agent, food_good=food, node_id=agent.current_node)))
 
-    cur_region = snapshot.get_node(agent.current_node).region
     inv_total = sum(v for k, v in agent.inventory.items() if not k.startswith("_"))
     effective_cap = _merchant_effective_cap(agent)
+    _CITY_DISTRICTS = {"city.market", "city.smithy", "city.kitchen", "city.residential"}
+    at_city = agent.current_node in _CITY_DISTRICTS
 
     # 2a. At farm.hub: deposit cooked_meal and any tools carried from city
     _FARM_TOOLS = ("plow", "sickle", "pickaxe", "pruning_shears")
@@ -332,8 +333,8 @@ def _select_merchant(agent: Agent, snapshot: WorldSnapshot, rng: Random) -> obje
                     agent=agent, node_id="farm.hub", good=good, qty=take,
                 )))
 
-    # 3. At city: deliver all farm goods to city.market (central hub)
-    if cur_region == RegionType.CITY:
+    # 3. At city district: deliver all farm goods to city.market (central hub)
+    if at_city:
         for good in _FARM_COLLECT_GOODS:
             qty = agent.inventory.get(good, 0)
             if qty > 0:
@@ -363,13 +364,9 @@ def _select_merchant(agent: Agent, snapshot: WorldSnapshot, rng: Random) -> obje
                         agent=agent, node_id="city.smithy", good=farm_tool, qty=take,
                     )))
                     break  # one tool type per trip
-        # 3d. Buy weapon when feeling unsafe and physically inside the city.
-        #     route.safe_mid is technically city-region but we want weapon
-        #     purchase to happen at an actual smithy, not on the road.
-        _CITY_DISTRICTS = {"city.market", "city.smithy", "city.kitchen", "city.residential"}
+        # 3d. Buy weapon when feeling unsafe and physically inside a city district.
         safety = agent.needs.get(NeedType.SAFETY, 0.0)
-        if (safety > 0.25 and not agent.has_usable_weapon()
-                and agent.current_node in _CITY_DISTRICTS):
+        if safety > 0.25 and not agent.has_usable_weapon():
             smithy = snapshot.get_node("city.smithy")
             if smithy.stockpile.get("sword", 0) > 0:
                 scores.append((0.92, AcquireWeaponAction(
@@ -448,7 +445,8 @@ def _select_raider(agent: RaiderFaction, snapshot: WorldSnapshot, rng: Random) -
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_TRADEABLE_GOODS = ("wheat", "meat", "fruit", "ore", "cooked_meal", "sword", "plow", "sickle")
+# Goods eligible for gold-based arbitrage (tools handled by dedicated deliver/collect logic)
+_TRADEABLE_GOODS = ("wheat", "meat", "fruit", "ore", "cooked_meal")
 
 
 def _merchant_market_action(
@@ -461,6 +459,11 @@ def _merchant_market_action(
     - 팔 수 있는 재화가 있고 현재 노드 가격이 구매가보다 높으면 → SellAction
     - gold가 있고 현재 노드 재화가 싸고 다른 노드에서 비싸게 팔 수 있으면 → BuyAction
     """
+    # Only trade at proper market nodes, not route midpoints
+    _TRADE_NODES = {"city.market", "farm.hub"}
+    if agent.current_node not in _TRADE_NODES:
+        return None
+
     world = _snapshot_world(snapshot)
     if world is None:
         return None
@@ -469,22 +472,25 @@ def _merchant_market_action(
     if cur_node is None:
         return None
 
+    total_gold = sum(getattr(a, "gold", 0) for a in world.agents.values())
+
     # --- SELL: 인벤토리에 있는 재화를 현재 노드에서 팔기 ---
     best_sell: tuple[float, object] | None = None
     for good in _TRADEABLE_GOODS:
         qty = agent.inventory.get(good, 0)
         if qty <= 0:
             continue
-        sell_price = node_price(cur_node.stockpile, good)
+        sell_price = node_price(cur_node.stockpile, good, total_gold)
         # 다른 노드의 구매가와 비교해 실제 차익이 있는 경우만
         buy_prices = [
-            node_price(n.stockpile, good)
+            node_price(n.stockpile, good, total_gold)
             for nid, n in world.nodes.items()
             if nid != agent.current_node
         ]
         min_buy = min(buy_prices) if buy_prices else sell_price
         margin = sell_price - min_buy
-        if margin >= MERCHANT_MIN_MARGIN:
+        estimated_revenue = max(1, round(qty * sell_price))
+        if margin >= MERCHANT_MIN_MARGIN and cur_node.gold >= estimated_revenue:
             score = 0.88 + min(0.08, margin / 20.0)
             action = SellAction(
                 agent=agent, node_id=agent.current_node,
@@ -505,11 +511,11 @@ def _merchant_market_action(
 
     best_buy: tuple[float, object] | None = None
     for good in _TRADEABLE_GOODS:
-        buy_price = node_price(cur_node.stockpile, good)
+        buy_price = node_price(cur_node.stockpile, good, total_gold)
         if cur_node.stockpile.get(good, 0) <= 2:
             continue
         sell_prices = [
-            node_price(n.stockpile, good)
+            node_price(n.stockpile, good, total_gold)
             for nid, n in world.nodes.items()
             if nid != agent.current_node
         ]

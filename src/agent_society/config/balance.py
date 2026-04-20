@@ -71,12 +71,12 @@ SCARCITY_K: float = 2.0
 MERCHANT_MIN_MARGIN: float = 0.5
 
 # Initial gold given to agents at world creation
-MERCHANT_INITIAL_GOLD: int = 30
-PRODUCER_INITIAL_GOLD: int = 10   # 생산자 초기 gold (도구 구매용)
-NODE_INITIAL_GOLD: int = 50       # 노드 초기 gold pool (거래 유동성)
+MERCHANT_INITIAL_GOLD: int = 80   # 상인 초기 자본 (왕복 운반 여러 번 커버 가능)
+PRODUCER_INITIAL_GOLD: int = 20   # 생산자 초기 gold (도구 1개 구매 가능한 수준)
+NODE_INITIAL_GOLD: int = 100      # 노드 초기 gold pool (시장 유동성 확보)
 
 # Gold wage per unit produced (gold 발행 원점 — 노동이 가치를 창출)
-PRODUCE_WAGE: float = 0.5         # BASE_VALUE × PRODUCE_WAGE = 생산 1단위당 임금
+PRODUCE_WAGE: float = 0.15        # BASE_VALUE × PRODUCE_WAGE = 생산 1단위당 임금
 
 # ── Inflation & Tax ───────────────────────────────────────────────────────────
 # 전체 유통 gold 합계 기준 인플레이션 배율 조정

@@ -188,7 +188,9 @@ class SimulationRecorder:
 def _extract_details(action: object) -> dict:
     details: dict = {}
     for attr in ("good", "output_good", "inputs", "item_out", "item_in",
-                 "qty_out", "qty_in", "target_node", "amount", "output_amount"):
+                 "qty_out", "qty_in", "target_node", "amount", "output_amount",
+                 "node_id", "deposit_node", "qty", "unit_price",
+                 "source_node", "weapon_type", "tool_type"):
         val = getattr(action, attr, None)
         if val is not None:
             details[attr] = val

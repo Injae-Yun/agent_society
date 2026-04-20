@@ -137,6 +137,12 @@ class ConsumeFoodAction:
             return {}
         delta: dict[str, int] = {}
         if node.stockpile.get(self.food_good, 0) > 0:
+            # Only charge gold at trade nodes (market/hub), not at production sub-nodes
+            if "trade" in node.affordances:
+                food_price = max(1, int(BASE_VALUE.get(self.food_good, 1.0)))
+                if self.agent.gold >= food_price:
+                    self.agent.gold -= food_price
+                    node.gold += food_price
             node.stockpile[self.food_good] -= 1
             delta[self.food_good] = -1
         elif self.agent.inventory.get(self.food_good, 0) > 0:
@@ -322,10 +328,16 @@ class AcquireToolAction:
         node = world.nodes.get(self.node_id)
         if node is None or node.stockpile.get(self.tool_type, 0) <= 0:
             return {}
+        cost = max(1, int(BASE_VALUE.get(self.tool_type, 4.0) * 2.5))
+        if self.agent.gold < cost:
+            return {}
         node.stockpile[self.tool_type] -= 1
+        self.agent.gold -= cost
+        if "trade" in node.affordances:
+            node.gold += cost
         self.agent.tool_durability[self.tool_type] = 10.0
         satisfy_need(self.agent, NeedType.TOOL_NEED, 0.5)
-        log.info("%s replaced %s from %s (durability reset)", self.agent.id, self.tool_type, self.node_id)
+        log.info("%s replaced %s from %s for %dg (durability reset)", self.agent.id, self.tool_type, self.node_id, cost)
         return {self.node_id: {self.tool_type: -1}}
 
 

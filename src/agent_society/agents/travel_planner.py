@@ -118,8 +118,8 @@ def _next_hop_toward(agent: Agent, world: World, destination: str) -> str | None
     return None
 
 
-_RISKY_ARMED_THRESHOLD   = 0.55  # armed: use risky unless very scared
-_RISKY_UNARMED_THRESHOLD = 0.10  # unarmed: only gamble when feeling very safe
+_RISKY_ARMED_THRESHOLD   = 0.75  # armed: use risky unless safety > 0.75 (very scared)
+_RISKY_UNARMED_THRESHOLD = 0.15  # unarmed: only gamble when feeling fairly safe
 
 
 def should_use_risky_route(agent: Agent) -> bool:

@@ -17,17 +17,21 @@ ROLE_COLORS: dict[str, str] = {
 }
 
 ACTION_ICONS: dict[str, str] = {
-    "produce":  "⛏",
-    "craft":    "🔨",
-    "trade":    "🤝",
-    "travel":   "🚶",
-    "transit":  "→",
-    "collect":  "📦",
-    "deliver":  "🏭",
-    "equip":    "🗡",
-    "consume":  "🍞",
-    "raid":     "⚔",
-    "idle":     "💤",
+    "produce":      "⛏",
+    "craft":        "🔨",
+    "trade":        "🤝",
+    "travel":       "🚶",
+    "transit":      "→",
+    "collect":      "📦",
+    "deliver":      "🏭",
+    "equip":        "🗡",
+    "consume":      "🍞",
+    "raid":         "⚔",
+    "idle":         "💤",
+    "buy":          "💰",
+    "sell":         "💸",
+    "acquire_tool": "🔧",
+    "restock":      "🔄",
 }
 
 # Node layout positions (x%, y%) — hand-tuned for the MVP map
@@ -347,7 +351,11 @@ function formatAction(a) {{
     case 'consume': return `식사 ${{a.d.food_good||''}}`;
     case 'collect': return `수집 ${{a.d.good||''}} ×${{a.d.qty||''}} from ${{a.d.node_id||a.nd}}`;
     case 'deliver': return `납품 ${{a.d.good||''}} ×${{a.d.qty||''}} → ${{a.d.deposit_node||''}}`;
-    case 'equip':   return `무기구입 ${{a.d.weapon_type||'sword'}} from ${{a.d.source_node||''}}`;
+    case 'equip':        return `무기구입 ${{a.d.weapon_type||'sword'}} from ${{a.d.source_node||''}}`;
+    case 'buy':          {{ const cost = a.d.unit_price ? ' (-' + Math.round((a.d.qty||1)*a.d.unit_price) + 'g)' : ''; return `구매 ${{a.d.good||''}} ×${{a.d.qty||''}}${{cost}}`; }}
+    case 'sell':         {{ const rev = a.d.unit_price ? ' (+' + Math.round((a.d.qty||1)*a.d.unit_price) + 'g)' : ''; return `판매 ${{a.d.good||''}} ×${{a.d.qty||''}}${{rev}}`; }}
+    case 'acquire_tool': return `도구구입 ${{a.d.tool_type||''}} from ${{a.d.node_id||''}}`;
+    case 'restock':      return `보충 ${{a.d.good||''}} ×${{a.d.qty||''}} ${{a.d.source_node||''}}→${{a.d.dest_node||''}}`;
     case 'raid':    {{
       const ri = (a.rd && a.rd._raid) ? a.rd._raid : {{}};
       const resKr = ri.result === 'repelled' ? '격퇴' : ri.result === 'partial_loss' ? '부분성공' : ri.result === 'plundered' ? '완전약탈' : '?';

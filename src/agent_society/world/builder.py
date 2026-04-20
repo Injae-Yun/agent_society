@@ -24,6 +24,7 @@ def build_world_from_yaml(path: Path | str) -> World:
             region=RegionType(n["region"]),
             stockpile=n.get("stockpile", {}),
             affordances=n.get("affordances", []),
+            gold=n.get("gold", NODE_INITIAL_GOLD),
         )
         nodes[node.id] = node
 

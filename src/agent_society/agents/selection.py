@@ -489,8 +489,7 @@ def _merchant_market_action(
         ]
         min_buy = min(buy_prices) if buy_prices else sell_price
         margin = sell_price - min_buy
-        estimated_revenue = max(1, round(qty * sell_price))
-        if margin >= MERCHANT_MIN_MARGIN and cur_node.gold >= estimated_revenue:
+        if margin >= MERCHANT_MIN_MARGIN and cur_node.gold > 0:
             score = 0.88 + min(0.08, margin / 20.0)
             action = SellAction(
                 agent=agent, node_id=agent.current_node,

@@ -1,0 +1,23 @@
+# Agent-Society 기본 설정
+# docs/research/04_local_llm_hardware.md 참조
+
+llm:
+  backend: ollama                       # "ollama" | "mock"
+  host: http://localhost:11434
+  model: gemma4:e4b                     # E4B Q8_K_XL 권장 (8.66 GB, RTX 5060 16GB 기준)
+  # 경량 dev 대안: gemma4:e4b-q4_0 (4.98 GB, 빠른 iteration)
+  # 품질 업그레이드: gemma4:26b-a4b-q3_k_m (12.5 GB, Q4 이상은 16GB 불가)
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 64
+  max_tokens: 200
+  timeout: 15.0
+  enable_thinking: false                # 반드시 false — <|think|> 토큰 미삽입
+  # stop tokens은 OllamaNarrator에 하드코딩 (Gemma 4 chat template 종료자)
+
+simulation:
+  seed: 42
+  quest_refresh_interval: 100          # ticks
+
+# CUDA 경고: 13.2 런타임 사용 시 GGUF 출력 품질 저하.
+# 반드시 CUDA 12.x (12.4 또는 12.6) 사용.

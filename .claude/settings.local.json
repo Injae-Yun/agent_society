@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(python -m pytest tests/unit -v)",
+      "Bash(python -m agent_society --ticks 200 --log-level WARNING)",
+      "Bash(python -m agent_society --scenario configs/mvp_scenario.yaml --ticks 500 --log-level WARNING)",
+      "Bash(python -m pytest tests/unit -v --tb=short)",
+      "Bash(python -m agent_society --scenario configs/mvp_scenario.yaml --ticks 200 --log-level WARNING)",
+      "Bash(python -c ' *)",
+      "Bash(python scripts/generate_replay.py --ticks 300 --scenario configs/mvp_scenario.yaml)",
+      "Bash(python scripts/generate_replay.py --ticks 300 --output output/replay.html)",
+      "Bash(python *)",
+      "WebSearch",
+      "Bash(ollama *)"
+    ]
+  }
+}

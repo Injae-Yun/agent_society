@@ -9,17 +9,33 @@ from agent_society.agents.needs import decay_needs
 from agent_society.agents.selection import select_action
 from agent_society.events.bus import WorldEventBus
 from agent_society.events.handlers import register_all_handlers
-from agent_society.schema import RaiderFaction, World
+from agent_society.schema import AdventurerAgent, PlayerAgent, RaiderFaction, World
 from agent_society.world.snapshot import WorldSnapshot
 
 log = logging.getLogger(__name__)
 
 
 class AgentSociety:
-    def __init__(self, bus: WorldEventBus, rng: Random | None = None) -> None:
+    def __init__(
+        self,
+        bus: WorldEventBus,
+        rng: Random | None = None,
+        quest_gen: object | None = None,
+        player_interface: object | None = None,
+    ) -> None:
         self._bus = bus
         self._rng = rng or Random()
+        self._quest_gen = quest_gen
+        self._player_interface = player_interface
         register_all_handlers(bus)
+
+    def set_quest_gen(self, quest_gen: object) -> None:
+        """Allow the driver to wire up the quest generator after construction."""
+        self._quest_gen = quest_gen
+
+    def set_player_interface(self, player_interface: object) -> None:
+        """Wire the player input source after construction."""
+        self._player_interface = player_interface
 
     def tick(self, world: World) -> list[tuple[str, object]]:
         """Run one tick for all agents (ID-ascending). Returns [(agent_id, action)] for recorder."""
@@ -58,8 +74,21 @@ class AgentSociety:
         if agent.equipped_weapon:
             agent.equipped_weapon.durability = max(0.0, agent.equipped_weapon.durability - 0.05)
 
-        # 3. Choose action
-        action = select_action(agent, snapshot, self._rng)
+        # 3. Choose action — Player / Adventurer / NPC paths diverge here.
+        #    PlayerAgent check runs first because it inherits from AdventurerAgent.
+        if isinstance(agent, PlayerAgent):
+            from agent_society.agents.player import tick_player
+            action = tick_player(
+                agent, world, self._bus, self._quest_gen,
+                self._player_interface, snapshot, self._rng,
+            )
+        elif isinstance(agent, AdventurerAgent) and self._quest_gen is not None:
+            from agent_society.agents.adventurer import tick_adventurer
+            action = tick_adventurer(
+                agent, world, self._bus, self._quest_gen, snapshot, self._rng,
+            )
+        else:
+            action = select_action(agent, snapshot, self._rng)
 
         # 4. Execute — store delta on action for recorder
         delta = action.execute(world, self._bus)

@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from agent_society.schema import Agent, NeedType, World
 from agent_society.world import world as world_ops
+from agent_society.world.hex_map import (
+    RISKY_ROUTE_IDS,
+    RISKY_TILE_SET,
+    SAFE_ROUTE_IDS,
+    SAFE_TILE_SET,
+)
 
-# Node region labels for routing decisions
-CITY_NODES = {"city.market", "city.smithy", "city.kitchen", "city.residential"}
-FARM_NODES = {"farm.hub", "farm.grain_field", "farm.pasture", "farm.orchard", "farm.mine"}
-RAIDER_NODES = {"raider.hideout"}
-
-# Route mid-points (waypoints)
-SAFE_MID = "route.safe_mid"
-RISKY_MID = "route.risky_mid"
+CITY_NODE = "city"
+FARM_NODE = "farm"
+RAIDER_HIDEOUT = "raider.hideout"
 
 # Goods that flow city→farm vs farm→city
 CITY_TO_FARM_GOODS = {"sword", "plow", "sickle", "pickaxe", "cooking_tools", "hammer", "cooked_meal"}
@@ -29,7 +30,7 @@ def next_hop(agent: Agent, world: World) -> str | None:
 
     # If no destination, choose one
     if agent.travel_destination is None:
-        agent.travel_destination = _choose_destination(agent, world)
+        agent.travel_destination = _choose_destination(agent)
 
     if agent.travel_destination is None:
         return None
@@ -37,57 +38,50 @@ def next_hop(agent: Agent, world: World) -> str | None:
     return _route_aware_hop(agent, world, agent.travel_destination)
 
 
-def _choose_destination(agent: Agent, world: World) -> str | None:
-    """Decide whether merchant heads to farm.hub or city.market.
-
-    Merchants never enter farm sub-nodes — they stop at farm.hub and interact
-    with producers via 1-hop range collection / trade.
-    """
+def _choose_destination(agent: Agent) -> str | None:
+    """Decide whether merchant heads to farm or city."""
     cur = agent.current_node
-
-    if cur in CITY_NODES or cur == SAFE_MID or cur == RISKY_MID:
-        return "farm.hub"
-
-    if cur in FARM_NODES:
-        return "city.market"
-
-    return "city.market"
+    if cur == FARM_NODE:
+        return CITY_NODE
+    # From city, route tiles, or anywhere else default to farm.
+    return FARM_NODE
 
 
 def _route_aware_hop(agent: Agent, world: World, destination: str) -> str | None:
     """Next hop with explicit safe/risky route selection.
 
-    Armed merchants take the risky route (faster: 4 ticks).
-    Unarmed merchants take the safe route (safer: 10 ticks).
-    Within city or farmland sub-nodes, fall through to BFS.
+    Route choice is made when entering from city or farm. Once on a route,
+    continue along it to the far end. Armed merchants prefer the risky route;
+    unarmed prefer safe.
     """
     cur = agent.current_node
     armed = should_use_risky_route(agent)
-    mid = RISKY_MID if armed else SAFE_MID
 
-    # ── Inter-region legs ────────────────────────────────────────────────────
-    # City → Farm: must exit through city.market (the only city-route junction)
-    if cur in CITY_NODES and destination in FARM_NODES:
-        if cur != "city.market":
-            return _next_hop_toward(agent, world, "city.market")
-        return mid
-    # At route mid heading to farm
-    if cur == SAFE_MID and destination in FARM_NODES:
-        return "farm.hub"
-    if cur == RISKY_MID and destination in FARM_NODES:
-        return "farm.hub"
-    # Farm → City: must exit through farm.hub (the only farm-route junction)
-    if cur in FARM_NODES and destination in CITY_NODES:
-        if cur != "farm.hub":
-            return _next_hop_toward(agent, world, "farm.hub")
-        return mid
-    # At route mid heading to city
-    if cur == SAFE_MID and destination in CITY_NODES:
-        return "city.market"
-    if cur == RISKY_MID and destination in CITY_NODES:
-        return "city.market"
+    # ── City → Farm: enter a route from the city side ────────────────────────
+    if cur == CITY_NODE and destination == FARM_NODE:
+        return RISKY_ROUTE_IDS[0] if armed else SAFE_ROUTE_IDS[0]
 
-    # ── Within same region: BFS ──────────────────────────────────────────────
+    # ── Farm → City: enter a route from the far end ──────────────────────────
+    if cur == FARM_NODE and destination == CITY_NODE:
+        return RISKY_ROUTE_IDS[-1] if armed else SAFE_ROUTE_IDS[-1]
+
+    # ── On safe route ────────────────────────────────────────────────────────
+    if cur in SAFE_TILE_SET:
+        idx = SAFE_ROUTE_IDS.index(cur)
+        if destination == FARM_NODE:
+            return SAFE_ROUTE_IDS[idx + 1] if idx + 1 < len(SAFE_ROUTE_IDS) else FARM_NODE
+        if destination == CITY_NODE:
+            return SAFE_ROUTE_IDS[idx - 1] if idx > 0 else CITY_NODE
+
+    # ── On risky route ───────────────────────────────────────────────────────
+    if cur in RISKY_TILE_SET:
+        idx = RISKY_ROUTE_IDS.index(cur)
+        if destination == FARM_NODE:
+            return RISKY_ROUTE_IDS[idx + 1] if idx + 1 < len(RISKY_ROUTE_IDS) else FARM_NODE
+        if destination == CITY_NODE:
+            return RISKY_ROUTE_IDS[idx - 1] if idx > 0 else CITY_NODE
+
+    # ── Fallback: BFS ────────────────────────────────────────────────────────
     return _next_hop_toward(agent, world, destination)
 
 
@@ -97,7 +91,6 @@ def _next_hop_toward(agent: Agent, world: World, destination: str) -> str | None
     if cur == destination:
         return None
 
-    # BFS over non-severed edges
     from collections import deque
     queue: deque[tuple[str, list[str]]] = deque()
     queue.append((cur, []))
@@ -123,17 +116,7 @@ _RISKY_UNARMED_THRESHOLD = 0.15  # unarmed: only gamble when feeling fairly safe
 
 
 def should_use_risky_route(agent: Agent) -> bool:
-    """Route choice based on weapon status and safety need.
-
-    Armed merchants take the risky (fast) route unless they're significantly
-    scared (safety > 0.55).  After a major raid they'll play it safe for ~20
-    ticks (0.4 spike / 0.010 decay = 40 ticks to 0; 0.4→0.55 is impossible so
-    they switch to safe route until safety decays to 0.55 from 0.8 in ~25 ticks).
-
-    Unarmed merchants very rarely gamble on the risky route when they feel
-    completely safe (safety < 0.10) — occasional bold moves that put them in
-    raider territory and create encounters that drive weapon purchases.
-    """
+    """Route choice based on weapon status and safety need."""
     safety = agent.needs.get(NeedType.SAFETY, 0.0)
     if agent.has_usable_weapon():
         return safety < _RISKY_ARMED_THRESHOLD

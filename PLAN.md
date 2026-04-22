@@ -21,8 +21,8 @@ NPC 사회가 자율적으로 돌아가는 월드 안에서 플레이어가 1명
 | M1 | ✅ 완료 | tick loop 스켈레톤 + 모든 시스템 stub |
 | **M2** | ✅ 완료 | Quest 시스템 + LLM 연결 |
 | **M3** | ✅ 완료 | 화폐 + 시장 가격 시스템 |
-| **M4** | 🔲 다음 | PlayerAgent (월드 내 행위자) |
-| M5 | 🔲 예정 | 플레이어 ↔ Quest 상호작용 루프 |
+| **M4** | ✅ 완료 | AdventurerAgent + Quest 효과 (자원 평형 자동화) |
+| **M5** | 🔲 다음 | PlayerAgent (AdventurerAgent와 quest 시스템 공유) |
 | M6 | 🔲 예정 | 세력(Faction) + 명성 시스템 |
 | M7 | 🔲 예정 | 맵 확장 (다중 도시·국가) |
 | M8 | 🔲 예정 | 엔딩 조건 + 게임 루프 완성 |
@@ -186,89 +186,151 @@ scarcity_factor = 1 + SCARCITY_K * max(0, 1 - stockpile / NORMAL_STOCKPILE[good]
 
 ---
 
-## M4 — PlayerAgent (월드 내 행위자)
+## M4 — AdventurerAgent + Quest 효과 (완료)
 
 ### 목표
-플레이어가 NPC와 **같은 tick** 안에서 움직이는 1인 Agent.
-NPC와 동일한 물리 규칙(이동 비용, 위협, 재화 거래) 적용.
+Quest 시스템을 "읽기만 하는 보드"에서 **자원 평형을 자동으로 유지하는 엔진**으로 전환.
+NPC Adventurer가 pending quest를 소비하면서 raider 토벌 / 부족 재화 공급 / 도로 복구를 실행한다.
+
+### 구현 요약
+- `Role.ADVENTURER` + `AdventurerAgent(skill, combat_power, active_quest_id, quest_progress)`
+- `QuestIntent`에 `taker_id`, `tier` (common | heroic) 추가
+- `agents/adventurer.py.tick_adventurer()` — eat → progress → accept → idle 흐름
+- `quests/effects.py.apply_completion()` — quest_type별 world mutation
+  - `raider_suppress` → raider.strength −25, 전원 safety −0.4
+  - `bulk_delivery` → city stockpile[target] +15
+  - `road_restore` → severed edge 복구
+  - `escort` → supporter safety −0.3
+- `AgentSociety.set_quest_gen()` — driver가 tick 시작 시 wiring
+- recorder에 `active_quest`, `quest_progress` 기록 / HTML 아이콘 📜⚒🏆
+
+### 검증
+3000-tick 시뮬에서 raider.strength 60→43→55 자체 평형, cycle당 2 quest 완료.
+tests 40/40 통과.
+
+### 🔲 Adventurer 고도화 (M5 이후 정리할 백로그)
+- **Quest throughput 확장** — 현재 cycle(168t)당 2개 제한. refresh 주기 단축 혹은 adventurer 1명이 여러 quest 순차 처리
+- **Quest 타입 다양화** — `WeaponsDemand`, `MineDelivery`, `Exploration` 등 intent 생성 패턴 확장 (M2.5 이벤트 카탈로그와 연동)
+- **Adventurer 경제 sustainability** — reward vs GoldTax 손실 밸런스 (현재 gold 2~8g 수준 유지). 등급제 reward 고려
+- **실제 이동** — 현재 Adventurer는 city 고정 추상 처리. `raider_suppress`면 hideout까지 가는 이동 포함
+- **전투 메커니즘** — combat_power를 실제 raider 전투로 연결 (M5 Player FIGHT와 같이 설계)
+- **Heroic tier 조건** — 현재 tier 필드만 존재. 실제 heroic quest 발생 조건 및 Player 전용 처리
+
+---
+
+## M5 — PlayerAgent (월드 내 행위자)
+
+### 목표
+플레이어가 NPC와 **같은 tick**에서 움직이는 1인 Agent.
+Quest 처리는 M4 Adventurer와 **같은 경로**(`quests/effects.py`) 공유 — Player는 "입력 받는 특별한 Adventurer".
 
 ### 플레이어와 NPC의 차이
-| 항목 | NPC | 플레이어 |
+| 항목 | Adventurer NPC | Player |
 |---|---|---|
-| 행동 결정 | `AgentSociety.tick()` 자동 결정 | 입력으로 받음 |
-| 목표 | needs 충족 | gold 축적 / 명성 / 엔딩 |
-| 추가 상태 | 없음 | `gold`, `reputation`, `quest_log` |
+| 행동 결정 | `tick_adventurer()` 자동 | 외부 `PlayerInterface` 입력 큐 |
+| Quest tier | `common`만 수락 | `common` + `heroic` 수락 가능 |
+| 추가 상태 | `skill`, `combat_power`, `active_quest_id`, `quest_progress` | 위 + `reputation`, `quest_log` |
 
 ### PlayerAgent 구조
 ```python
 @dataclass
-class PlayerAgent(Agent):
-    gold: int = 0
-    reputation: dict[str, float] = field(default_factory=dict)  # faction_id → -100~100
-    quest_log: list[str] = field(default_factory=list)           # 완료한 quest id
-    pending_action: PlayerAction | None = None
+class PlayerAgent(AdventurerAgent):     # inherits quest fields
+    reputation: dict[str, float] = field(default_factory=dict)   # faction_id → -100~100
+    quest_log: list[str] = field(default_factory=list)           # 완료한 quest id 기록
+    pending_action: PlayerAction | None = None                   # 다음 tick 처리할 입력
 ```
 
 ### 플레이어 행동 타입
 ```python
-class PlayerAction(Enum):
-    MOVE       # destination node 지정 → Agent.travel_destination 설정
-    BUY        # (good, qty) → gold 차감, inventory 증가
-    SELL       # (good, qty) → gold 증가, inventory 차감
-    FIGHT      # 현재 node의 raider와 전투 → raider.strength 감소
-    REST       # 1 tick 대기
-    ACCEPT_QUEST  # quest_id → status = active
+class PlayerActionType(Enum):
+    MOVE          # target_node 지정 → travel
+    BUY           # (good, qty) at current trade node
+    SELL          # (good, qty)
+    FIGHT         # raider.hideout에서 raider와 전투 → strength -=
+    REST          # 1 tick 대기, hunger 소폭 회복
+    ACCEPT_QUEST  # quest_id → 수락
+    WORK_QUEST    # active quest progress (Adventurer와 동일 틱당 진행)
+    COMPLETE_QUEST # progress ≥ 1.0 일 때 명시적 완료
+
+@dataclass
+class PlayerAction:
+    type: PlayerActionType
+    target_node: str | None = None
+    good: str | None = None
+    qty: int | None = None
+    quest_id: str | None = None
 ```
 
-### 전투 해소
+### PlayerInterface
+```python
+class PlayerInterface(Protocol):
+    def tick(self, world: World, player: PlayerAgent) -> PlayerAction | None: ...
 ```
-outcome = player_power - raider.strength * random(0.8, 1.2)
-  player_power = 10 + equipped_weapon.durability * 5  (무기 있으면 강함)
-  outcome > 0  → raider.strength -= 15~30, 플레이어 안전
-  outcome <= 0 → 플레이어 gold 일부 손실 (약탈)
+- **M5 기본**: `ScriptedPlayer` — 액션 큐에서 순서대로 꺼냄 (헤드리스 시뮬용 / 테스트 용)
+- **추후**: `CLIPlayer` — stdin 입력, `BrowserPlayer` — WebSocket (M7+)
+
+### Player tick 흐름 (`tick_player()` in `agents/player.py`)
+```
+1. pending_action 없음:
+   → PlayerInterface.tick() 호출 → 액션 수령
+2. pending_action 있음:
+   → 타입별 dispatch
+      MOVE  → TravelAction
+      BUY   → BuyAction  (BuyAction 기존 로직 재사용)
+      SELL  → SellAction
+      FIGHT → raider strength -= combat_power × 2; player safety 상승
+      ACCEPT_QUEST → quest_gen.accept() + taker_id = player.id
+      WORK_QUEST   → active quest progress 증가 (Adventurer와 동일 공식)
+      COMPLETE_QUEST → apply_completion() + 보상 + quest_log 추가
+      REST  → hunger -0.15, safety -0.05
+3. pending_action 소비 후 None으로
 ```
 
-### tick 컨트롤
-플레이어는 게임 속도를 선택할 수 있다 (실시간 처리 속도, 게임 로직 변경 없음):
-- `PAUSED` — tick 진행 중단, 플레이어 명령 대기
-- `1x` — 표준 속도
-- `4x` / `16x` — 가속 (tick_interval 단축)
+### 전투 (FIGHT)
+```
+player_power = player.combat_power + equipped_weapon.durability × 0.5
+raider_power = raider.strength × rng.uniform(0.8, 1.2)
+
+if player_power > raider_power:
+    raider.strength −= (player_power − raider_power) × 0.5      # 15~35
+    player.needs[SAFETY] = max(0, safety − 0.3)                  # 영웅담
+else:
+    # 약탈당함
+    loss = min(player.gold, int((raider_power − player_power)))
+    player.gold −= loss; raider.inventory["gold_loot"] += loss   # 추상화
+    equipped_weapon.durability = max(0, durability − 5)
+```
+
+### Heroic tier quest
+- QuestGenerator가 `tier="heroic"` 플래그 설정 조건:
+  - `urgency ≥ 0.9` AND `quest_type == "raider_suppress"` → heroic
+  - 또는 M6 명성 상위 구간에서만 해금되는 전용 quest (추후)
+- heroic 은 `_pick_best_quest`에서 adventurer 제외, **Player만 수락 가능**
 
 ### 구현 파일
 | 파일 | 책임 |
 |---|---|
-| `schema.py` | `PlayerAgent` dataclass 추가 |
-| `player/actions.py` | `PlayerAction` enum + 각 행동의 WorldEvent 발행 로직 |
-| `player/cli.py` | CLI 입력 → PlayerAction 변환, tick 컨트롤 |
-| `simulation/driver.py` | `PlayerAgent.tick()` 분기 처리 |
+| `schema.py` | `PlayerAgent` dataclass (AdventurerAgent 상속) |
+| `agents/player.py` | `tick_player()` — Adventurer 로직을 입력-주도로 재사용 |
+| `player/interface.py` | `PlayerInterface` Protocol + `ScriptedPlayer` 구현 |
+| `player/actions.py` | `PlayerAction` enum + 타입별 dispatch |
+| `simulation/driver.py` | `player` 슬롯 실제 활용 (기존에 stub만 있음) |
+| `configs/mvp_scenario.yaml` | `player` 섹션 — 기본 1명, gold 100, 무기 없음 |
 
----
+### 달성 조건 판정 (M4 `apply_completion`과 공유)
+Adventurer와 동일한 경로. Player 전용 차이:
+- `bulk_delivery`: Player가 실제로 SELL 한 qty 누적이 보상 목표 이상 → `WORK_QUEST` 대신 SELL action으로 자동 progress 계산
+- `raider_suppress`: FIGHT action 반복으로 raider.strength 감소 기여. progress = Σ(이번 quest 동안 가한 damage) / required_damage
+- `escort` / `road_restore`: MOVE 기반 방문 판정
 
-## M5 — 플레이어 ↔ Quest 상호작용 루프
+### 보상 지급 (경제 순환)
+- `QuestIntent.reward` 를 gold로 환산해 Player 지급 (Adventurer와 동일 공식)
+- 기존 M4 는 새 gold 발행 — **M5 폴리시: 의뢰자 agent gold에서 차감**해 closed-loop 유지
+- 의뢰자 pool < reward → partial reward + `quest_log`에 "deferred payment" 기록
 
-### 목표
-퀘스트 수락 → 플레이어 행동 → 달성 판정 → 보상 지급 → 월드 변화.
-처음으로 "게임"이 된다.
-
-### 달성 조건 판정
-
-| quest_type | 달성 조건 |
-|---|---|
-| `bulk_delivery` | 플레이어가 target node에 지정 재화 qty 이상 SELL |
-| `raider_suppress` | 플레이어 FIGHT 후 raider.strength < 30 |
-| `road_restore` | 플레이어가 끊긴 edge 양 끝 node를 방문 (수리 재화 지참) |
-| `escort` | 플레이어와 target agent가 같은 tick에 목적지 도착 |
-
-### 보상 지급
-- `QuestIntent.reward` 에 정의된 gold + 재화를 PlayerAgent에 지급.
-- 보상은 의뢰자 agent의 gold/inventory에서 차감 (경제 순환).
-- 의뢰자 자원 부족 시 보상 일부 감액.
-
-### 월드 피드백
-퀘스트 완료 이벤트 → WorldEventBus 발행:
-- `bulk_delivery` 완료 → 해당 node stockpile 증가 → agent needs 감소
-- `raider_suppress` 완료 → raider.strength 감소 → safety needs 회복
-- `road_restore` 완료 → edge.severed = False → 상인 이동 재개
+### 테스트
+- `tests/unit/test_player.py` — ScriptedPlayer가 BUY/SELL/ACCEPT_QUEST 실행, state 검증
+- `tests/integration/test_player_quest_cycle.py` — quest 전체 사이클 e2e
 
 ---
 

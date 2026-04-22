@@ -120,6 +120,13 @@ def _make_intent(
     for good in base_reward:
         base_reward[good] = max(1, int(base_reward[good] * (1 + urgency)))
 
+    # Heroic tier — Player-only. NPC Adventurers skip these via taker filter.
+    # Triggered when the situation is dire enough that a lone hero is the only
+    # feasible responder.
+    tier = "common"
+    if quest_type == "raider_suppress" and urgency >= 0.9:
+        tier = "heroic"
+
     return QuestIntent(
         id=str(uuid.uuid4())[:8],
         quest_type=quest_type,
@@ -131,4 +138,5 @@ def _make_intent(
         status="pending",
         issued_tick=issued_tick,
         deadline_tick=issued_tick + QUEST_REFRESH_INTERVAL,
+        tier=tier,
     )

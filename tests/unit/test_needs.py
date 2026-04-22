@@ -9,7 +9,7 @@ from agent_society.schema import Agent, NeedType, Role
 
 
 def _agent(needs: dict | None = None) -> Agent:
-    return Agent("a1", "Test", Role.FARMER, "farm.hub", "farm.hub",
+    return Agent("a1", "Test", Role.FARMER, "farm", "farm",
                  needs=needs or {})
 
 

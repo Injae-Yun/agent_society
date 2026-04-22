@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from agent_society.config.balance import (
-    BASE_VALUE, BASELINE_GOLD, INFLATION_CAP, INFLATION_FLOOR,
-    NORMAL_STOCKPILE, SCARCITY_K,
-)
+from agent_society.economy.config import BASE_VALUE, CONFIG, NORMAL_STOCKPILE
 from agent_society.economy.goods import base_value
 
 
 def inflation_factor(total_gold: int) -> float:
-    """유통 gold 총량 기반 인플레이션 배율 (1.0 = 기준)."""
-    raw = total_gold / max(BASELINE_GOLD, 1)
-    return max(INFLATION_FLOOR, min(INFLATION_CAP, raw))
+    """유통 gold 총량 기반 인플레이션 배율 (1.0 = 기준).
+
+    Reads CONFIG at call-time so builder-time re-tuning of `baseline_gold`
+    (e.g. scaling with agent count) takes effect immediately.
+    """
+    raw = total_gold / max(CONFIG.baseline_gold, 1)
+    return max(CONFIG.inflation_floor, min(CONFIG.inflation_cap, raw))
 
 
 # ── Gold-based market price ───────────────────────────────────────────────────
@@ -28,9 +29,9 @@ def node_price(stockpile: dict[str, int], good: str, total_gold: int = 0) -> flo
     normal = NORMAL_STOCKPILE.get(good, 10)
     stock = max(0, stockpile.get(good, 0))
     ratio = stock / normal if normal > 0 else 1.0
-    scarcity = base * (1.0 + SCARCITY_K * (1.0 - ratio))
+    scarcity = base * (1.0 + CONFIG.scarcity_k * (1.0 - ratio))
     floor = base * 0.5
-    ceiling = base * (1.0 + SCARCITY_K)
+    ceiling = base * (1.0 + CONFIG.scarcity_k)
     price = max(floor, min(ceiling, scarcity))
     if total_gold > 0:
         price *= inflation_factor(total_gold)

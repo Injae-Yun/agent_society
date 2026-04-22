@@ -24,19 +24,21 @@ def mock_narrator() -> MockNarrator:
 def mini_world() -> World:
     """3-agent, 3-node minimal world for fast unit tests."""
     nodes = {
-        "city.market": Node("city.market", "Market", RegionType.CITY, stockpile={"wheat": 10}),
-        "farm.hub": Node("farm.hub", "Farm Hub", RegionType.FARMLAND, stockpile={"meat": 5}),
+        "city": Node("city", "City", RegionType.CITY, stockpile={"wheat": 10},
+                     affordances=["trade", "craft_weapons", "cook"]),
+        "farm": Node("farm", "Farmland", RegionType.FARMLAND, stockpile={"meat": 5},
+                     affordances=["trade", "produce_wheat", "produce_meat"]),
         "raider.hideout": Node("raider.hideout", "Hideout", RegionType.RAIDER_BASE),
     }
     edges = [
-        Edge("city.market", "farm.hub", travel_cost=10, base_threat=0.3, capacity=2),
+        Edge("city", "farm", travel_cost=10, base_threat=0.3, capacity=2),
     ]
     agents = {
-        "farmer_1": Agent("farmer_1", "Farmer", Role.FARMER, "farm.hub", "farm.hub",
+        "farmer_1": Agent("farmer_1", "Farmer", Role.FARMER, "farm", "farm",
                           needs={NeedType.HUNGER: 0.2}),
-        "merchant_1": Agent("merchant_1", "Merchant", Role.MERCHANT, "city.market", "city.market",
+        "merchant_1": Agent("merchant_1", "Merchant", Role.MERCHANT, "city", "city",
                             needs={NeedType.HUNGER: 0.1}, inventory={"wheat": 3}),
-        "blacksmith_1": Agent("blacksmith_1", "Blacksmith", Role.BLACKSMITH, "city.market", "city.market"),
+        "blacksmith_1": Agent("blacksmith_1", "Blacksmith", Role.BLACKSMITH, "city", "city"),
     }
     world = World(nodes=nodes, edges=edges, agents=agents)
     build_indices(world)

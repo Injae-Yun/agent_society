@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 
 from agent_society.config.balance import WEAPON_POWER as WEAPON_POWER_TABLE
-from agent_society.schema import NeedType, RaiderFaction, World
+from agent_society.schema import AdventurerAgent, NeedType, RaiderFaction, World
 from agent_society.simulation.clock import tick_to_season
 
 
@@ -33,6 +33,8 @@ class AgentState:
     strength: float | None = None  # RaiderFaction only
     weapon: str | None = None      # equipped weapon type, or None if unarmed
     weapon_power: int | None = None  # combat value of equipped weapon (for display)
+    active_quest: str | None = None  # AdventurerAgent/Player: currently-held quest id
+    quest_progress: float | None = None  # 0.0~1.0
 
 
 @dataclass
@@ -70,7 +72,13 @@ class SimulationRecorder:
         """Call once before simulation starts to record node/edge layout."""
         self.meta = {
             "nodes": {
-                nid: {"name": n.name, "region": n.region.value}
+                nid: {
+                    "name": n.name,
+                    "region": n.region.value,
+                    "hex_q": n.hex_q,
+                    "hex_r": n.hex_r,
+                    "cluster_id": n.cluster_id,
+                }
                 for nid, n in world.nodes.items()
             },
             "edges": [
@@ -109,6 +117,11 @@ class SimulationRecorder:
             if agent.equipped_weapon and agent.equipped_weapon.is_usable():
                 weapon = agent.equipped_weapon.type
                 weapon_power = WEAPON_POWER_TABLE.get(weapon, 0)
+            active_quest = None
+            quest_progress = None
+            if isinstance(agent, AdventurerAgent):
+                active_quest = agent.active_quest_id
+                quest_progress = round(agent.quest_progress, 2) if agent.active_quest_id else None
             agent_states[aid] = AgentState(
                 node=agent.current_node,
                 needs={nt.value: round(v, 3) for nt, v in agent.needs.items()},
@@ -120,6 +133,8 @@ class SimulationRecorder:
                 strength=round(agent.strength, 1) if isinstance(agent, RaiderFaction) else None,
                 weapon=weapon,
                 weapon_power=weapon_power,
+                active_quest=active_quest,
+                quest_progress=quest_progress,
             )
 
         # Actions
@@ -217,6 +232,8 @@ def _tick_to_dict(r: TickRecord) -> dict:
             "str": s.strength,
             "wpn": s.weapon,
             "wp": s.weapon_power,
+            "aq": s.active_quest,
+            "qp": s.quest_progress,
         } for aid, s in r.agent_states.items()},
         "ac": [{
             "id": a.agent_id,

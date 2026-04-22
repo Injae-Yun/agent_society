@@ -46,6 +46,13 @@ class SimulationDriver:
         self._quest_gen = quest_gen
         self._player = player
         self._recorder = recorder
+        # Wire society <- quest_gen + player_interface. Player is now ticked as
+        # a regular agent inside AgentSociety; driver's legacy `_player.tick()`
+        # call is kept for backwards compat with external CLI drivers.
+        if quest_gen is not None and hasattr(agent_society, "set_quest_gen"):
+            agent_society.set_quest_gen(quest_gen)
+        if player is not None and hasattr(agent_society, "set_player_interface"):
+            agent_society.set_player_interface(player)
 
     def world_tick(self) -> None:
         w = self.world
@@ -68,9 +75,14 @@ class SimulationDriver:
         if self._quest_gen is not None and w.tick > 0 and w.tick % QUEST_REFRESH_INTERVAL == 0:
             self._quest_gen.tick(WorldSnapshot(w))  # type: ignore[union-attr]
 
-        # 6. Player / free NPC I/O
-        if self._player is not None:
-            self._player.tick(w)  # type: ignore[union-attr]
+        # 6. Player I/O — the PlayerAgent is now ticked inside AgentSociety, so
+        #    this slot is only invoked if the interface has a legacy `tick()`
+        #    method (e.g. a CLI that needs to poll stdin independently).
+        if self._player is not None and hasattr(self._player, "tick"):
+            try:
+                self._player.tick(w)  # type: ignore[union-attr]
+            except TypeError:
+                pass
             fired = self._bus.drain(w)
             w.active_events.extend(fired)
 

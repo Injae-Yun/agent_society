@@ -32,8 +32,8 @@ FEW_SHOT_EXAMPLES = [
         "intent": "quest_type=raider_suppress, target=raider.hideout, urgency=0.85, supporters=['merchant_1','herder_2']",
         "context": (
             "계절: Summer / "
-            "긴급 needs: [merchant_1 Alice(safety=0.90, city.market), herder_2 Kay(safety=0.75, farm.pasture)] / "
-            "이벤트: RaidAttempt(city.market, plundered) / "
+            "긴급 needs: [merchant_1 Alice(safety=0.90, city), herder_2 Kay(safety=0.75, farm)] / "
+            "이벤트: RaidAttempt(route.risky.3, plundered) / "
             "scarcity: wheat=0.08, meat=0.12"
         ),
         "narrative": (
@@ -44,11 +44,11 @@ FEW_SHOT_EXAMPLES = [
         ),
     },
     {
-        "intent": "quest_type=road_restore, target=edge(city.market→farm.hub), urgency=0.72, supporters=['farmer_3']",
+        "intent": "quest_type=road_restore, target=edge(city→farm), urgency=0.72, supporters=['farmer_3']",
         "context": (
             "계절: Autumn / "
-            "긴급 needs: [farmer_3 Cam(hunger=0.78, farm.grain_field), cook_1 Nara(tool_need=0.74, city.kitchen)] / "
-            "이벤트: RoadCollapse(city.market↔farm.hub) / "
+            "긴급 needs: [farmer_3 Cam(hunger=0.78, farm), cook_1 Nara(tool_need=0.74, city)] / "
+            "이벤트: RoadCollapse(city↔farm) / "
             "scarcity: wheat=0.25, meat=0.18"
         ),
         "narrative": (
@@ -62,7 +62,7 @@ FEW_SHOT_EXAMPLES = [
         "intent": "quest_type=bulk_delivery, target=ore, urgency=0.60, supporters=['blacksmith_1']",
         "context": (
             "계절: Spring / "
-            "긴급 needs: [blacksmith_1 Hira(tool_need=0.82, city.smithy), miner_1 Sam(hunger=0.65, farm.mine)] / "
+            "긴급 needs: [blacksmith_1 Hira(tool_need=0.82, city), miner_1 Sam(hunger=0.65, farm)] / "
             "이벤트: (없음) / "
             "scarcity: ore=0.45, sword=0.60"
         ),

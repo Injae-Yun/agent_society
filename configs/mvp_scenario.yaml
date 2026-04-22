@@ -1,285 +1,231 @@
 seed: 42
 
 nodes:
-  # City
-  - id: city.market
-    name: City Market
+  # ── City/Farm stockpile은 builder가 economy/equilibrium에서 자동 생성.
+  #    수동 override 필요 시 `stockpile: {good: qty}` 지정 가능. ─────────────────
+  - id: city
+    name: City
     region: city
-    affordances: [trade]
-    stockpile: {wheat: 30, meat: 15}
+    affordances: [trade, craft_weapons, craft_tools, cook, rest]
 
-  - id: city.smithy
-    name: Smithy
-    region: city
-    affordances: [craft_weapons, craft_tools]
-    stockpile: {ore: 24}
-
-  - id: city.kitchen
-    name: Kitchen
-    region: city
-    affordances: [cook]
-    stockpile: {wheat: 15, meat: 9, cooking_tools: 3}
-
-  - id: city.residential
-    name: Residential
-    region: city
-    affordances: [rest]
-    stockpile: {wheat: 15}
-
-  # Farmland
-  - id: farm.grain_field
-    name: Grain Field
+  - id: farm
+    name: Farmland
     region: farmland
-    affordances: [produce_wheat]
-    stockpile: {wheat: 60, plow: 6, sickle: 6}
+    affordances: [trade, produce_wheat, produce_meat, produce_fruit, produce_ore]
 
-  - id: farm.pasture
-    name: Pasture
-    region: farmland
-    affordances: [produce_meat]
-    stockpile: {meat: 45, sickle: 6}
-
-  - id: farm.orchard
-    name: Orchard
-    region: farmland
-    affordances: [produce_fruit]
-    stockpile: {fruit: 30, pruning_shears: 3}
-
-  - id: farm.mine
-    name: Mine
-    region: farmland
-    affordances: [produce_ore]
-    stockpile: {ore: 36, pickaxe: 6}
-
-  - id: farm.hub
-    name: Farmland Hub
-    region: farmland
-    affordances: [trade]
-    stockpile: {wheat: 15, meat: 15}
-
-  # Raider base
   - id: raider.hideout
     name: Raider Hideout
     region: raider_base
     affordances: [raider_spawn]
     stockpile: {meat: 3}
 
-  # Route waypoints
-  - id: route.safe_mid
-    name: Safe Route Midpoint
-    region: city
+  # ── Risky route tiles (상단, 4 타일) ────────────────────────────────────────
+  - {id: route.risky.1, name: "Risky Route Tile 1", region: raider_base}
+  - {id: route.risky.2, name: "Risky Route Tile 2", region: raider_base}
+  - {id: route.risky.3, name: "Risky Route Tile 3", region: raider_base}
+  - {id: route.risky.4, name: "Risky Route Tile 4", region: raider_base}
 
-  - id: route.risky_mid
-    name: Risky Route Midpoint
-    region: raider_base
+  # ── Safe route tiles (하단 U자, 10 타일) ────────────────────────────────────
+  - {id: route.safe.1,  name: "Safe Route Tile 1",  region: route}
+  - {id: route.safe.2,  name: "Safe Route Tile 2",  region: route}
+  - {id: route.safe.3,  name: "Safe Route Tile 3",  region: route}
+  - {id: route.safe.4,  name: "Safe Route Tile 4",  region: route}
+  - {id: route.safe.5,  name: "Safe Route Tile 5",  region: route}
+  - {id: route.safe.6,  name: "Safe Route Tile 6",  region: route}
+  - {id: route.safe.7,  name: "Safe Route Tile 7",  region: route}
+  - {id: route.safe.8,  name: "Safe Route Tile 8",  region: route}
+  - {id: route.safe.9,  name: "Safe Route Tile 9",  region: route}
+  - {id: route.safe.10, name: "Safe Route Tile 10", region: route}
 
 edges:
-  # Safe route — 10 tick total (5+5), 1% per-tick ambush chance
-  - u: city.market
-    v: route.safe_mid
-    travel_cost: 5
-    base_threat: 0.10
-    capacity: 4
+  # ── Risky route (city → risky.1 → … → risky.4 → farm, 총 5 hops) ────────────
+  - {u: city,           v: route.risky.1, travel_cost: 1, base_threat: 0.25, capacity: 4}
+  - {u: route.risky.1,  v: route.risky.2, travel_cost: 1, base_threat: 0.55, capacity: 4}
+  - {u: route.risky.2,  v: route.risky.3, travel_cost: 1, base_threat: 0.70, capacity: 4}
+  - {u: route.risky.3,  v: route.risky.4, travel_cost: 1, base_threat: 0.45, capacity: 4}
+  - {u: route.risky.4,  v: farm,          travel_cost: 1, base_threat: 0.25, capacity: 4}
 
-  - u: route.safe_mid
-    v: farm.hub
-    travel_cost: 5
-    base_threat: 0.10
-    capacity: 4
+  # ── Safe route (city → safe.1 → … → safe.10 → farm, 총 11 hops) ─────────────
+  - {u: city,           v: route.safe.1,  travel_cost: 1, base_threat: 0.02, capacity: 4}
+  - {u: route.safe.1,   v: route.safe.2,  travel_cost: 1, base_threat: 0.02, capacity: 4}
+  - {u: route.safe.2,   v: route.safe.3,  travel_cost: 1, base_threat: 0.02, capacity: 4}
+  - {u: route.safe.3,   v: route.safe.4,  travel_cost: 1, base_threat: 0.03, capacity: 4}
+  - {u: route.safe.4,   v: route.safe.5,  travel_cost: 1, base_threat: 0.03, capacity: 4}
+  - {u: route.safe.5,   v: route.safe.6,  travel_cost: 1, base_threat: 0.03, capacity: 4}
+  - {u: route.safe.6,   v: route.safe.7,  travel_cost: 1, base_threat: 0.03, capacity: 4}
+  - {u: route.safe.7,   v: route.safe.8,  travel_cost: 1, base_threat: 0.03, capacity: 4}
+  - {u: route.safe.8,   v: route.safe.9,  travel_cost: 1, base_threat: 0.02, capacity: 4}
+  - {u: route.safe.9,   v: route.safe.10, travel_cost: 1, base_threat: 0.02, capacity: 4}
+  - {u: route.safe.10,  v: farm,          travel_cost: 1, base_threat: 0.02, capacity: 4}
 
-  # Risky route — 4 tick total (2+2), 15% per-tick ambush chance
-  - u: city.market
-    v: route.risky_mid
-    travel_cost: 2
-    base_threat: 0.70
-    capacity: 4
-
-  - u: route.risky_mid
-    v: farm.hub
-    travel_cost: 2
-    base_threat: 0.70
-    capacity: 4
-
-  # Raider base connection
-  - u: route.risky_mid
-    v: raider.hideout
-    travel_cost: 1
-    base_threat: 0.0
-    capacity: 1
-
-  # City internal edges
-  - u: city.market
-    v: city.smithy
-    travel_cost: 1
-    capacity: 20
-
-  - u: city.market
-    v: city.kitchen
-    travel_cost: 1
-    capacity: 20
-
-  - u: city.market
-    v: city.residential
-    travel_cost: 1
-    capacity: 20
-
-  # Farmland internal edges
-  - u: farm.hub
-    v: farm.grain_field
-    travel_cost: 2
-    capacity: 20
-
-  - u: farm.hub
-    v: farm.pasture
-    travel_cost: 2
-    capacity: 20
-
-  - u: farm.hub
-    v: farm.orchard
-    travel_cost: 2
-    capacity: 20
-
-  - u: farm.hub
-    v: farm.mine
-    travel_cost: 2
-    capacity: 20
+  # ── Hideout adjacency (risky.3 ↔ hideout) ───────────────────────────────────
+  - {u: route.risky.3, v: raider.hideout, travel_cost: 1, base_threat: 0.0, capacity: 1}
 
 agents:
-  # ── Farmers (5) ──────────────────────────────────────────────────────────
-  - {id: farmer_1, name: "Farmer Anna",  role: farmer, home_node: farm.grain_field, inventory: {wheat: 2}}
-  - {id: farmer_2, name: "Farmer Ben",   role: farmer, home_node: farm.grain_field}
-  - {id: farmer_3, name: "Farmer Cam",   role: farmer, home_node: farm.grain_field, inventory: {wheat: 1}}
-  - {id: farmer_4, name: "Farmer Dana",  role: farmer, home_node: farm.grain_field}
-  - {id: farmer_5, name: "Farmer Eli",   role: farmer, home_node: farm.grain_field, inventory: {wheat: 3}}
+  # ── Farmers (7 — wheat 공급량을 cook recipe 수요까지 커버) ───────────────────
+  - {id: farmer_1, name: "Farmer Anna",  role: farmer, home_node: farm, gold: 20, inventory: {wheat: 2}}
+  - {id: farmer_2, name: "Farmer Ben",   role: farmer, home_node: farm, gold: 20}
+  - {id: farmer_3, name: "Farmer Cam",   role: farmer, home_node: farm, gold: 20, inventory: {wheat: 1}}
+  - {id: farmer_4, name: "Farmer Dana",  role: farmer, home_node: farm, gold: 20}
+  - {id: farmer_5, name: "Farmer Eli",   role: farmer, home_node: farm, gold: 20, inventory: {wheat: 3}}
+  - {id: farmer_6, name: "Farmer Faye",  role: farmer, home_node: farm, gold: 20}
+  - {id: farmer_7, name: "Farmer Gus",   role: farmer, home_node: farm, gold: 20, inventory: {wheat: 1}}
 
-  # ── Herders (5) ──────────────────────────────────────────────────────────
-  - {id: herder_1, name: "Herder Jan",   role: herder, home_node: farm.pasture, inventory: {meat: 2}}
-  - {id: herder_2, name: "Herder Kay",   role: herder, home_node: farm.pasture}
-  - {id: herder_3, name: "Herder Leo",   role: herder, home_node: farm.pasture, inventory: {meat: 3}}
-  - {id: herder_4, name: "Herder Mia",   role: herder, home_node: farm.pasture}
-  - {id: herder_5, name: "Herder Nina",  role: herder, home_node: farm.pasture, inventory: {meat: 1}}
+  # ── Herders (5) ──────────────────────────────────────────────────────────────
+  - {id: herder_1, name: "Herder Jan",   role: herder, home_node: farm, gold: 20, inventory: {meat: 2}}
+  - {id: herder_2, name: "Herder Kay",   role: herder, home_node: farm, gold: 20}
+  - {id: herder_3, name: "Herder Leo",   role: herder, home_node: farm, gold: 20, inventory: {meat: 3}}
+  - {id: herder_4, name: "Herder Mia",   role: herder, home_node: farm, gold: 20}
+  - {id: herder_5, name: "Herder Nina",  role: herder, home_node: farm, gold: 20, inventory: {meat: 1}}
 
-  # ── Miners (5) ───────────────────────────────────────────────────────────
-  - {id: miner_1, name: "Miner Sam",     role: miner, home_node: farm.mine, inventory: {ore: 3}}
-  - {id: miner_2, name: "Miner Tara",    role: miner, home_node: farm.mine}
-  - {id: miner_3, name: "Miner Uma",     role: miner, home_node: farm.mine, inventory: {ore: 2}}
-  - {id: miner_4, name: "Miner Vic",     role: miner, home_node: farm.mine}
-  - {id: miner_5, name: "Miner Wren",    role: miner, home_node: farm.mine, inventory: {ore: 1}}
+  # ── Miners (5) ───────────────────────────────────────────────────────────────
+  - {id: miner_1, name: "Miner Sam",     role: miner, home_node: farm, gold: 20, inventory: {ore: 3}}
+  - {id: miner_2, name: "Miner Tara",    role: miner, home_node: farm, gold: 20}
+  - {id: miner_3, name: "Miner Uma",     role: miner, home_node: farm, gold: 20, inventory: {ore: 2}}
+  - {id: miner_4, name: "Miner Vic",     role: miner, home_node: farm, gold: 20}
+  - {id: miner_5, name: "Miner Wren",    role: miner, home_node: farm, gold: 20, inventory: {ore: 1}}
 
-  # ── Orchardists (4) ──────────────────────────────────────────────────────
-  - {id: orchardist_1, name: "Orchardist Bram", role: orchardist, home_node: farm.orchard, inventory: {fruit: 2}}
-  - {id: orchardist_2, name: "Orchardist Cleo", role: orchardist, home_node: farm.orchard}
-  - {id: orchardist_3, name: "Orchardist Dex",  role: orchardist, home_node: farm.orchard, inventory: {fruit: 1}}
-  - {id: orchardist_4, name: "Orchardist Esme", role: orchardist, home_node: farm.orchard}
+  # ── Orchardists (4) ──────────────────────────────────────────────────────────
+  - {id: orchardist_1, name: "Orchardist Bram", role: orchardist, home_node: farm, gold: 20, inventory: {fruit: 2}}
+  - {id: orchardist_2, name: "Orchardist Cleo", role: orchardist, home_node: farm, gold: 20}
+  - {id: orchardist_3, name: "Orchardist Dex",  role: orchardist, home_node: farm, gold: 20, inventory: {fruit: 1}}
+  - {id: orchardist_4, name: "Orchardist Esme", role: orchardist, home_node: farm, gold: 20}
 
-  # ── Blacksmiths (3) ──────────────────────────────────────────────────────
-  - {id: blacksmith_1, name: "Blacksmith Hira",  role: blacksmith, home_node: city.smithy, inventory: {ore: 5}}
-  - {id: blacksmith_2, name: "Blacksmith Iris",  role: blacksmith, home_node: city.smithy, inventory: {ore: 3}}
-  - {id: blacksmith_3, name: "Blacksmith Jett",  role: blacksmith, home_node: city.smithy}
+  # ── Blacksmiths (3) ──────────────────────────────────────────────────────────
+  - {id: blacksmith_1, name: "Blacksmith Hira",  role: blacksmith, home_node: city, gold: 20, inventory: {ore: 5}}
+  - {id: blacksmith_2, name: "Blacksmith Iris",  role: blacksmith, home_node: city, gold: 20, inventory: {ore: 3}}
+  - {id: blacksmith_3, name: "Blacksmith Jett",  role: blacksmith, home_node: city, gold: 20}
 
-  # ── Cooks (6) ────────────────────────────────────────────────────────────
-  - {id: cook_1, name: "Cook Nara",  role: cook, home_node: city.kitchen, inventory: {wheat: 3, meat: 2}}
-  - {id: cook_2, name: "Cook Orin",  role: cook, home_node: city.kitchen, inventory: {wheat: 2}}
-  - {id: cook_3, name: "Cook Pax",   role: cook, home_node: city.kitchen}
-  - {id: cook_4, name: "Cook Qori",  role: cook, home_node: city.kitchen, inventory: {meat: 3}}
-  - {id: cook_5, name: "Cook Ren",   role: cook, home_node: city.kitchen}
-  - {id: cook_6, name: "Cook Saya",  role: cook, home_node: city.kitchen, inventory: {wheat: 1}}
+  # ── Cooks (3) ────────────────────────────────────────────────────────────────
+  - {id: cook_1, name: "Cook Nara",  role: cook, home_node: city, gold: 20, inventory: {wheat: 3, meat: 2}}
+  - {id: cook_2, name: "Cook Orin",  role: cook, home_node: city, gold: 20, inventory: {wheat: 2}}
+  - {id: cook_3, name: "Cook Pax",   role: cook, home_node: city, gold: 20}
 
-  # ── Merchants (12) — staggered positions across the map ───────────────────
-  # 초기 무장: 3명만 (나머지는 습격당하면 무기 구입)
+  # ── Merchants (12) — staggered positions across the map ──────────────────────
   - id: merchant_1
     name: "Merchant Alice"
     role: merchant
-    home_node: city.market
-    current_node: city.market
+    home_node: city
+    current_node: city
     inventory: {wheat: 4, meat: 2}
     equipped_weapon: {type: sword, tier: basic, durability: 40, max_durability: 50}
 
   - id: merchant_2
     name: "Merchant Bob"
     role: merchant
-    home_node: city.market
-    current_node: route.safe_mid
+    home_node: city
+    current_node: route.safe.5
     inventory: {ore: 2, fruit: 2}
 
   - id: merchant_3
     name: "Merchant Cira"
     role: merchant
-    home_node: city.market
-    current_node: farm.hub
+    home_node: city
+    current_node: farm
     inventory: {wheat: 3, meat: 2}
     equipped_weapon: {type: sword, tier: basic, durability: 35, max_durability: 50}
 
   - id: merchant_4
     name: "Merchant Dior"
     role: merchant
-    home_node: city.market
-    current_node: farm.grain_field
+    home_node: city
+    current_node: farm
     inventory: {ore: 3}
 
   - id: merchant_5
     name: "Merchant Eren"
     role: merchant
-    home_node: city.market
-    current_node: farm.pasture
+    home_node: city
+    current_node: farm
     inventory: {fruit: 2, meat: 1}
 
   - id: merchant_6
     name: "Merchant Fira"
     role: merchant
-    home_node: city.market
-    current_node: route.risky_mid
+    home_node: city
+    current_node: route.risky.2
     inventory: {wheat: 3}
     equipped_weapon: {type: sword, tier: basic, durability: 45, max_durability: 50}
 
   - id: merchant_7
     name: "Merchant Gael"
     role: merchant
-    home_node: city.market
-    current_node: city.market
+    home_node: city
+    current_node: city
     inventory: {meat: 3, ore: 1}
 
   - id: merchant_8
     name: "Merchant Hana"
     role: merchant
-    home_node: city.market
-    current_node: farm.mine
+    home_node: city
+    current_node: farm
     inventory: {wheat: 2}
 
   - id: merchant_9
     name: "Merchant Ivan"
     role: merchant
-    home_node: city.market
-    current_node: route.safe_mid
+    home_node: city
+    current_node: route.safe.8
     inventory: {ore: 2, meat: 2}
 
   - id: merchant_10
     name: "Merchant Jade"
     role: merchant
-    home_node: city.market
-    current_node: farm.orchard
+    home_node: city
+    current_node: farm
     inventory: {wheat: 2, ore: 1}
 
   - id: merchant_11
     name: "Merchant Kael"
     role: merchant
-    home_node: city.market
-    current_node: farm.hub
+    home_node: city
+    current_node: farm
     inventory: {fruit: 2}
 
   - id: merchant_12
     name: "Merchant Lena"
     role: merchant
-    home_node: city.market
-    current_node: city.market
+    home_node: city
+    current_node: city
     inventory: {meat: 2, fruit: 1}
 
-  # ── Raider (1) ───────────────────────────────────────────────────────────
+  # ── Raider (1) ────────────────────────────────────────────────────────────────
   - id: raiders
     name: Raider Band
     role: raider
     home_node: raider.hideout
     strength: 60.0
     inventory: {meat: 2}
+
+  # ── Adventurers (2) — NPC quest takers, help stabilise raider strength &
+  #    deliver goods where the QuestGenerator flags shortages. ──────────────────
+  - id: adventurer_1
+    name: "Adventurer Ryn"
+    role: adventurer
+    home_node: city
+    gold: 100
+    skill: 55
+    combat_power: 25
+    equipped_weapon: {type: sword, tier: basic, durability: 45, max_durability: 50}
+
+  - id: adventurer_2
+    name: "Adventurer Saga"
+    role: adventurer
+    home_node: city
+    gold: 100
+    skill: 50
+    combat_power: 20
+    equipped_weapon: {type: sword, tier: basic, durability: 40, max_durability: 50}
+
+  # ── Player (1) — the one controlled from the outside; idle if no interface
+  #    is attached (default). Only eligible agent for `heroic`-tier quests. ──
+  - id: player_1
+    name: "Hero"
+    role: player
+    home_node: city
+    gold: 150
+    skill: 70
+    combat_power: 35
+    equipped_weapon: {type: sword, tier: basic, durability: 50, max_durability: 50}
 
 initial_events: []

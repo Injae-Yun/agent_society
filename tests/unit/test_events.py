@@ -102,8 +102,8 @@ def test_road_collapse_handler(mini_world):
         tick=0,
         source="test",
         severity=EventSeverity.MAJOR,
-        edge_u="city.market",
-        edge_v="farm.hub",
+        edge_u="city",
+        edge_v="farm",
     )
     bus.publish(collapse)
     bus.drain(mini_world)

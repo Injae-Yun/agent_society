@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from agent_society.agents.needs import satisfy_need
 from agent_society.agents.raider import raid_resolution
-from agent_society.config.balance import BASE_VALUE, PRODUCE_WAGE
+from agent_society.economy.config import BASE_VALUE, CONFIG
 from agent_society.events.bus import WorldEventBus
 from agent_society.events.types import EventSeverity, RaidAttempt
 from agent_society.schema import Agent, Item, NeedType, RaiderFaction, Tier, World
@@ -15,11 +15,13 @@ from agent_society.world import world as world_ops
 
 log = logging.getLogger(__name__)
 
-PRODUCE_AMOUNT = 1       # units produced per tick (base)
-INV_WAGE_CAP = 3        # max personal inventory from wage (prevent hoarding)
-FOOD_SATISFY = 0.5       # hunger reduction from eating one food item (~8 hour satisfaction)
-TOOL_DECAY = 0.1         # durability lost per production action (~100 actions per tool)
-TOOL_NEED_SPIKE = 0.3    # need spike when tool is broken
+# Tunables live in economy.config; these are local aliases for readability.
+PRODUCE_AMOUNT  = CONFIG.produce_amount_per_action
+INV_WAGE_CAP    = CONFIG.inv_wage_cap
+FOOD_SATISFY    = CONFIG.food_satisfy_hunger
+TOOL_DECAY      = CONFIG.tool_decay_per_action
+TOOL_NEED_SPIKE = CONFIG.tool_need_spike_on_break
+PRODUCE_WAGE    = CONFIG.produce_wage_coef
 
 # Role → primary tool type
 ROLE_TOOL: dict[str, str] = {
@@ -74,8 +76,8 @@ class ProduceAction:
         cur_inv = self.agent.inventory.get(self.good, 0)
         if cur_inv < INV_WAGE_CAP:
             self.agent.inventory[self.good] = cur_inv + 1
-        # Gold 임금: 생산이 gold를 세계에 주입하는 원점
-        wage = max(1, int(actual * BASE_VALUE.get(self.good, 1.0) * PRODUCE_WAGE))
+        # Gold 임금 — round (not int-truncate) so BASE=1 goods still pay ≈1g fairly
+        wage = max(1, round(actual * BASE_VALUE.get(self.good, 1.0) * PRODUCE_WAGE))
         self.agent.gold += wage
 
         log.debug("Agent %s produced %d %s at %s wage=%dg (tool=%s %.2f)",
@@ -120,7 +122,14 @@ class CraftAction:
             delta[good] = -qty
         node.stockpile[self.output_good] = node.stockpile.get(self.output_good, 0) + self.output_amount
         delta[self.output_good] = self.output_amount
-        log.debug("Agent %s crafted %d %s", self.agent.id, self.output_amount, self.output_good)
+        # Wage in coin + 1 unit of own product to inventory (capped) so the
+        # crafter can self-consume their work — same model as ProduceAction.
+        cur_inv = self.agent.inventory.get(self.output_good, 0)
+        if cur_inv < INV_WAGE_CAP:
+            self.agent.inventory[self.output_good] = cur_inv + 1
+        wage = max(1, round(self.output_amount * BASE_VALUE.get(self.output_good, 1.0) * PRODUCE_WAGE))
+        self.agent.gold += wage
+        log.debug("Agent %s crafted %d %s wage=%dg", self.agent.id, self.output_amount, self.output_good, wage)
         return {self.node_id: delta}
 
 
@@ -129,28 +138,71 @@ class ConsumeFoodAction:
     agent: Agent
     food_good: str
     node_id: str
+    qty: int = 1                       # units consumed in one meal action
     action_type: str = field(default="consume", init=False)
 
     def execute(self, world: World, bus: WorldEventBus) -> dict:
+        from agent_society.economy.config import FOOD_SATIETY_PER_UNIT
+
         node = world.nodes.get(self.node_id)
         if node is None:
             return {}
-        delta: dict[str, int] = {}
-        if node.stockpile.get(self.food_good, 0) > 0:
-            # Only charge gold at trade nodes (market/hub), not at production sub-nodes
+
+        # How much food is available from own inventory vs node stockpile.
+        want = max(1, int(self.qty))
+        from_inv_avail = self.agent.inventory.get(self.food_good, 0)
+        from_stock_avail = node.stockpile.get(self.food_good, 0)
+
+        # Eat from own inventory first (free — produced-and-kept stock), then
+        # pay for anything extra from the node stockpile. This lets producers
+        # subsist on their own wage inventory when they have no gold.
+        take_from_inv = min(want, from_inv_avail)
+        remaining = want - take_from_inv
+        take_from_stock = min(remaining, from_stock_avail)
+
+        if take_from_stock > 0:
             if "trade" in node.affordances:
-                food_price = max(1, int(BASE_VALUE.get(self.food_good, 1.0)))
-                if self.agent.gold >= food_price:
-                    self.agent.gold -= food_price
-                    node.gold += food_price
-            node.stockpile[self.food_good] -= 1
-            delta[self.food_good] = -1
-        elif self.agent.inventory.get(self.food_good, 0) > 0:
-            self.agent.inventory[self.food_good] -= 1
-            delta[self.food_good] = -1
-        else:
+                from agent_society.economy.exchange import node_price
+                from agent_society.economy.routing import PRODUCER_OF, distribute_to_producers
+                # Self-sufficiency: producers eat their own-grown food for free
+                # (a farmer at the farm doesn't pay for wheat they just grew).
+                free_to_agent = PRODUCER_OF.get(self.food_good) == self.agent.role
+                if free_to_agent:
+                    price_per = 0
+                else:
+                    total_gold = sum(getattr(a, "gold", 0) for a in world.agents.values())
+                    price_per = max(1, round(node_price(node.stockpile, self.food_good, total_gold)))
+                if price_per > 0:
+                    affordable = self.agent.gold // price_per
+                    take_from_stock = min(take_from_stock, affordable)
+                    if take_from_stock > 0:
+                        cost = price_per * take_from_stock
+                        self.agent.gold -= cost
+                        routed = distribute_to_producers(
+                            world, self.node_id, self.food_good, cost,
+                            exclude_agent_id=self.agent.id,
+                        )
+                        node.gold += (cost - routed)
+            else:
+                # Subsistence cost at non-trade nodes: 1g per unit.
+                affordable = self.agent.gold
+                take_from_stock = min(take_from_stock, affordable)
+                if take_from_stock > 0:
+                    self.agent.gold -= take_from_stock
+
+        total_eaten = take_from_stock + take_from_inv
+        if total_eaten <= 0:
             return {}
-        satisfy_need(self.agent, NeedType.HUNGER, FOOD_SATISFY)
+
+        delta: dict[str, int] = {}
+        if take_from_stock > 0:
+            node.stockpile[self.food_good] = node.stockpile.get(self.food_good, 0) - take_from_stock
+            delta[self.food_good] = delta.get(self.food_good, 0) - take_from_stock
+        if take_from_inv > 0:
+            self.agent.inventory[self.food_good] -= take_from_inv
+
+        satiety_per_unit = FOOD_SATIETY_PER_UNIT.get(self.food_good, FOOD_SATISFY)
+        satisfy_need(self.agent, NeedType.HUNGER, satiety_per_unit * total_eaten)
         if self.food_good in ("fruit", "cooked_meal"):
             satisfy_need(self.agent, NeedType.FOOD_SATISFACTION, 0.5)
         return {self.node_id: delta} if delta else {}
@@ -198,11 +250,11 @@ class TravelAction:
         for edge in world.edges:
             if ((edge.u == self.agent.current_node and edge.v == self.target_node) or
                     (edge.v == self.agent.current_node and edge.u == self.target_node)):
-                edge_cost = max(1, edge.travel_cost)
+                edge_cost = max(0, edge.travel_cost)
                 break
         prev = self.agent.current_node
         world_ops.move_agent(world, self.agent.id, self.target_node)
-        self.agent.travel_ticks_remaining = edge_cost - 1  # -1 because this tick counts
+        self.agent.travel_ticks_remaining = max(0, edge_cost - 1)  # 0 = instant (intra-cluster)
         log.debug("Agent %s: %s → %s (cost=%d)", self.agent.id, prev, self.target_node, edge_cost)
         return {"_travel": {"from": prev, "to": self.target_node, "cost": edge_cost}}
 
@@ -328,13 +380,19 @@ class AcquireToolAction:
         node = world.nodes.get(self.node_id)
         if node is None or node.stockpile.get(self.tool_type, 0) <= 0:
             return {}
-        cost = max(1, int(BASE_VALUE.get(self.tool_type, 4.0) * 2.5))
+        cost = max(1, round(BASE_VALUE.get(self.tool_type, 4.0) * 1.5))
         if self.agent.gold < cost:
             return {}
         node.stockpile[self.tool_type] -= 1
         self.agent.gold -= cost
         if "trade" in node.affordances:
-            node.gold += cost
+            # Pay the blacksmith(s) who made it — fall back to node.gold
+            from agent_society.economy.routing import distribute_to_producers
+            routed = distribute_to_producers(
+                world, self.node_id, self.tool_type, cost,
+                exclude_agent_id=self.agent.id,
+            )
+            node.gold += (cost - routed)
         self.agent.tool_durability[self.tool_type] = 10.0
         satisfy_need(self.agent, NeedType.TOOL_NEED, 0.5)
         log.info("%s replaced %s from %s for %dg (durability reset)", self.agent.id, self.tool_type, self.node_id, cost)
@@ -361,13 +419,18 @@ class BuyAction:
         if qty <= 0:
             return {}
         cost = round(qty * self.unit_price)
-        # 닫힌 gold 계: agent → node.gold
+        # Agent pays; gold goes to the good's producer(s) if present, else node pool.
         self.agent.gold -= cost
-        node.gold += cost
+        from agent_society.economy.routing import distribute_to_producers
+        routed = distribute_to_producers(
+            world, self.node_id, self.good, cost,
+            exclude_agent_id=self.agent.id,
+        )
+        node.gold += (cost - routed)
         node.stockpile[self.good] -= qty
         self.agent.inventory[self.good] = self.agent.inventory.get(self.good, 0) + qty
-        log.debug("Buy: %s bought %d %s @ %.1f g/unit = %dg (node %s, pool→%d)",
-                  self.agent.id, qty, self.good, self.unit_price, cost, self.node_id, node.gold)
+        log.debug("Buy: %s bought %d %s @ %.1f g/unit = %dg (routed→producer:%d, node:%d)",
+                  self.agent.id, qty, self.good, self.unit_price, cost, routed, cost - routed)
         return {self.node_id: {self.good: -qty}, "_gold": -cost}
 
 
@@ -390,18 +453,97 @@ class SellAction:
         if qty <= 0:
             return {}
         revenue = round(qty * self.unit_price)
-        # node.gold가 부족하면 가능한 만큼만 지급
-        actual_revenue = min(revenue, node.gold)
-        if actual_revenue <= 0 and node.gold <= 0:
+        # Prefer to charge consumer agents at this market; fall back to node pool.
+        from agent_society.economy.routing import charge_consumers
+        from_consumers = charge_consumers(
+            world, self.node_id, self.good, revenue,
+            exclude_agent_id=self.agent.id,
+        )
+        shortfall = revenue - from_consumers
+        from_node = min(shortfall, node.gold) if shortfall > 0 else 0
+        node.gold -= from_node
+        actual_revenue = from_consumers + from_node
+        if actual_revenue <= 0:
             return {}
-        # 닫힌 gold 계: node.gold → agent
-        node.gold -= actual_revenue
         self.agent.gold += actual_revenue
         self.agent.inventory[self.good] -= qty
         node.stockpile[self.good] = node.stockpile.get(self.good, 0) + qty
-        log.debug("Sell: %s sold %d %s @ %.1f g/unit = %dg (node %s, pool→%d)",
-                  self.agent.id, qty, self.good, self.unit_price, actual_revenue, self.node_id, node.gold)
+        log.debug("Sell: %s sold %d %s @ %.1f g/unit = %dg (consumers:%d, node:%d)",
+                  self.agent.id, qty, self.good, self.unit_price, actual_revenue, from_consumers, from_node)
         return {self.node_id: {self.good: qty}, "_gold": actual_revenue}
+
+
+# ── Player-only actions ───────────────────────────────────────────────────────
+
+@dataclass
+class FightAction:
+    """Recorder-only record for a combat resolution — state is mutated inside
+    `tick_player._fight()` before this action is returned."""
+    agent: Agent
+    target_id: str
+    result: str                # victory | defeat | no_target
+    damage: float = 0.0
+    gold_lost: int = 0
+    action_type: str = field(default="fight", init=False)
+
+    def execute(self, world: World, bus: WorldEventBus) -> dict:
+        return {"_fight": {
+            "result": self.result, "target": self.target_id,
+            "damage": round(self.damage, 1), "gold_lost": self.gold_lost,
+        }}
+
+
+@dataclass
+class RestAction:
+    agent: Agent
+    action_type: str = field(default="rest", init=False)
+
+    def execute(self, world: World, bus: WorldEventBus) -> dict:
+        return {}
+
+
+# ── Quest actions (Adventurer/Player) ────────────────────────────────────────
+# These are recorder-only: the actual state changes (quest_gen accept/complete,
+# reward gold, world effects) happen in `_tick_adventurer` before we build the
+# action record. Keeping execute() as a no-op means Adventurer side-effects
+# stay in one place instead of being split between AgentSociety and handlers.
+
+@dataclass
+class QuestAcceptAction:
+    agent: Agent
+    quest_id: str
+    quest_type: str
+    target: str
+    action_type: str = field(default="quest_accept", init=False)
+
+    def execute(self, world: World, bus: WorldEventBus) -> dict:
+        return {"_quest": {"id": self.quest_id, "type": self.quest_type, "target": self.target}}
+
+
+@dataclass
+class QuestProgressAction:
+    agent: Agent
+    quest_id: str
+    progress: float
+    action_type: str = field(default="quest_work", init=False)
+
+    def execute(self, world: World, bus: WorldEventBus) -> dict:
+        return {"_quest": {"id": self.quest_id, "progress": round(self.progress, 2)}}
+
+
+@dataclass
+class QuestCompleteAction:
+    agent: Agent
+    quest_id: str
+    quest_type: str
+    reward_gold: int
+    effect: dict
+    action_type: str = field(default="quest_complete", init=False)
+
+    def execute(self, world: World, bus: WorldEventBus) -> dict:
+        return {"_quest": {"id": self.quest_id, "type": self.quest_type,
+                           "completed": True, "reward": self.reward_gold,
+                           "effect": self.effect}}
 
 
 @dataclass

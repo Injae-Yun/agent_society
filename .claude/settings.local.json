@@ -12,7 +12,8 @@
       "Bash(python scripts/generate_replay.py --ticks 300 --output output/replay.html)",
       "Bash(python *)",
       "WebSearch",
-      "Bash(ollama *)"
+      "Bash(ollama *)",
+      "Bash(pytest tests/ -q)"
     ]
   }
 }

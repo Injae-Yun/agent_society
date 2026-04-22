@@ -24,9 +24,11 @@ from agent_society.agents.actions import (
     TradeAction,
     TravelAction,
 )
-from agent_society.config.balance import MERCHANT_MIN_MARGIN
+from agent_society.economy.config import CONFIG, MERCHANT_MIN_MARGIN, NORMAL_STOCKPILE, units_per_meal
+from agent_society.economy.equilibrium import suggest_stockpile_cap
 from agent_society.economy.exchange import node_price
 from agent_society.agents.travel_planner import has_goods_to_trade, next_hop, should_use_risky_route
+from agent_society.world.hex_map import AMBUSH_PROB, RISKY_ROUTE_IDS, RISKY_TILE_SET, SAFE_ROUTE_IDS
 from agent_society.agents.roles import ROLE_CATALOG
 from agent_society.schema import Agent, NeedType, RaiderFaction, RegionType, Role
 from agent_society.world import world as world_ops
@@ -38,16 +40,10 @@ FOOD_GOODS = ("cooked_meal", "fruit", "meat", "wheat")   # preference order
 SURPLUS_THRESHOLD = 1    # inventory qty above which agent will trade away a good
 TRADE_SCORE = 0.8        # relative to hunger score (hunger always prioritised)
 
-# Raider geography
+# Canonical node IDs
+CITY_NODE = "city"
+FARM_NODE = "farm"
 RAIDER_HOME = "raider.hideout"
-RISKY_MID = "route.risky_mid"
-SAFE_MID = "route.safe_mid"
-
-# Raider ambush probability per tick when a merchant is at RISKY_MID.
-# 2-tick transit: escape probability = (1 - p)^2.
-# At p=0.65: ~12% full escape — risky but survivable.
-# At p=0.35 (old): ~42% escape — too lenient; merchants under-priced the route.
-AMBUSH_PROB_RISKY = 0.65
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -69,137 +65,99 @@ def select_action(agent: Agent, snapshot: WorldSnapshot, rng: Random | None = No
 
 # ── Role-specific selectors ───────────────────────────────────────────────────
 
-_FARM_HUB = "farm.hub"
-_LOCAL_STOCKPILE_CAP = 15   # produce until node hits this
-_HUB_STOCKPILE_CAP   = 25   # stop depositing if hub already full
-_DEPOSIT_QTY         = 5    # units pushed per deposit action
+def _good_cap(good: str) -> int:
+    """Dynamic per-good production cap derived from current NORMAL_STOCKPILE."""
+    return suggest_stockpile_cap(good, NORMAL_STOCKPILE.get(good, 10))
 
 
 def _select_producer(agent: Agent, snapshot: WorldSnapshot) -> object:
-    """Farmer / Herder / Miner / Orchardist.
-
-    Hub model: produce into local node stockpile, then deposit surplus to
-    farm.hub. No direct peer-to-peer trading — the market hub handles exchange.
-    """
+    """Farmer / Herder / Miner / Orchardist — all live at the single 'farm' node."""
     scores: list[tuple[float, object]] = []
 
-    # 1. Eat if hungry — prefer local food; fall back to collecting from farm.hub
+    # 1. Eat if hungry — farm stockpile carries all food
     hunger = agent.needs.get(NeedType.HUNGER, 0.0)
-    food = _food_at_node(agent, snapshot)
-    if hunger > 0.5 and food:
-        scores.append((hunger, ConsumeFoodAction(agent=agent, food_good=food, node_id=agent.current_node)))
-    elif hunger > 0.6:
-        # No local food — try to collect cooked_meal from farm.hub (1-hop away)
-        hub_cooked = snapshot.get_node(_FARM_HUB).stockpile.get("cooked_meal", 0)
-        if hub_cooked > 5:
-            scores.append((hunger * 0.85, CollectFromNodeAction(
-                agent=agent, node_id=_FARM_HUB, good="cooked_meal", qty=1,
-            )))
+    meal = _food_at_node(agent, snapshot)
+    if hunger > 0.5 and meal:
+        food, food_qty = meal
+        scores.append((hunger, ConsumeFoodAction(
+            agent=agent, food_good=food, node_id=agent.current_node, qty=food_qty,
+        )))
 
-    # Tool acquisition — when tool is worn/broken, try to replace from local node or farm.hub
+    # 2. Tool acquisition — skip if we can't afford it (else we'd retry every
+    #    tick in a gold-starved loop)
     tool_type = ROLE_TOOL.get(agent.role.value, "")
     tool_need = agent.needs.get(NeedType.TOOL_NEED, 0.0)
     if tool_type and (tool_need > 0.2 or agent.get_tool_durability(tool_type) < 2.0):
-        local_node = snapshot.get_node(agent.current_node)
-        if local_node.stockpile.get(tool_type, 0) > 0:
-            scores.append((0.95, AcquireToolAction(agent=agent, node_id=agent.current_node, tool_type=tool_type)))
-        elif agent.current_node != _FARM_HUB:
-            hub = snapshot.get_node(_FARM_HUB)
-            if hub.stockpile.get(tool_type, 0) > 0:
-                scores.append((0.90, AcquireToolAction(agent=agent, node_id=_FARM_HUB, tool_type=tool_type)))
+        from agent_society.economy.config import BASE_VALUE
+        cost = max(1, round(BASE_VALUE.get(tool_type, 4.0) * 1.5))
+        node = snapshot.get_node(agent.current_node)
+        if node.stockpile.get(tool_type, 0) > 0 and agent.gold >= cost:
+            scores.append((0.95, AcquireToolAction(
+                agent=agent, node_id=agent.current_node, tool_type=tool_type,
+            )))
 
+    # 3. Produce primary good if farm stockpile under cap
     role_def = ROLE_CATALOG.get(agent.role)
     if role_def and role_def.primary_good:
         good = role_def.primary_good
         node = snapshot.get_node(agent.current_node)
-        local_qty = node.stockpile.get(good, 0)
-
-        if local_qty < _LOCAL_STOCKPILE_CAP:
-            # 2. Produce — base score 0.65 always beats any secondary action
+        qty = node.stockpile.get(good, 0)
+        if qty < _good_cap(good):
             scarcity = snapshot.scarcity(good)
             scores.append((0.65 + scarcity * 0.35, ProduceAction(
                 agent=agent, node_id=agent.current_node, good=good,
             )))
-        else:
-            # 3. Local cap reached → deposit surplus to farm.hub (hub model)
-            hub_qty = snapshot.get_node(_FARM_HUB).stockpile.get(good, 0)
-            if hub_qty < _HUB_STOCKPILE_CAP:
-                scores.append((0.60, NodeTransferAction(
-                    agent=agent,
-                    source_node=agent.current_node,
-                    dest_node=_FARM_HUB,
-                    good=good,
-                    qty=_DEPOSIT_QTY,
-                )))
 
     return _pick_best(scores, agent)
-
-
-_CITY_MARKET = "city.market"
-_FOOD_GOODS_ORDER = ("cooked_meal", "fruit", "meat", "wheat")
 
 
 def _select_blacksmith(agent: Agent, snapshot: WorldSnapshot) -> object:
     scores: list[tuple[float, object]] = []
 
     hunger = agent.needs.get(NeedType.HUNGER, 0.0)
-    food = _food_at_node(agent, snapshot)
-    if hunger > 0.5 and food:
-        scores.append((hunger, ConsumeFoodAction(agent=agent, food_good=food, node_id=agent.current_node)))
-    elif hunger > 0.5:
-        # No food at node/inventory — collect from city.market (1-hop away)
-        market = snapshot.get_node(_CITY_MARKET)
-        for good in _FOOD_GOODS_ORDER:
-            if market.stockpile.get(good, 0) > 0:
-                scores.append((hunger * 0.85, CollectFromNodeAction(
-                    agent=agent, node_id=_CITY_MARKET, good=good, qty=1,
-                )))
-                break
+    meal = _food_at_node(agent, snapshot)
+    if hunger > 0.5 and meal:
+        food, food_qty = meal
+        scores.append((hunger, ConsumeFoodAction(
+            agent=agent, food_good=food, node_id=agent.current_node, qty=food_qty,
+        )))
 
-    node = snapshot.get_node(agent.current_node)
+    node = snapshot.get_node(agent.current_node)  # == "city"
     ore_local = node.stockpile.get("ore", 0)
 
-    # Restock ore from adjacent nodes (city.market is 1 hop) if running low
-    if ore_local < 8:
-        world = _snapshot_world(snapshot)
-        if world:
-            for edge in world_ops.edges_from(world, agent.current_node):
-                neighbor = edge.v if edge.u == agent.current_node else edge.u
-                n_node = snapshot.get_node(neighbor)
-                ore_there = n_node.stockpile.get("ore", 0)
-                if ore_there >= 2:
-                    scores.append((0.95, NodeTransferAction(
-                        agent=agent, source_node=neighbor, dest_node=agent.current_node,
-                        good="ore", qty=min(8, ore_there),
-                    )))
+    # Craft when world-wide stock is below the equilibrium cap.
+    # Using NORMAL_STOCKPILE (population-scaled) instead of absolute scarcity
+    # keeps craft activity right-sized as agent counts change.
+    def _need(good: str, headroom: float = 1.5) -> float:
+        total = sum(n.stockpile.get(good, 0) for n in _snapshot_world(snapshot).nodes.values())
+        normal = NORMAL_STOCKPILE.get(good, 10)
+        target = max(3, normal * headroom)
+        if total >= target:
+            return 0.0
+        # 1.0 when empty, 0.0 when at/above target
+        return max(0.0, 1.0 - total / target)
 
-    # Craft thresholds — stop producing when world stock is already sufficient.
-    # scarcity = 1/total: 0.05 → 20 units, 0.10 → 10 units in world.
-    _WEAPON_SCARCITY_MIN = 0.04   # craft sword/plow only if fewer than ~25 in world
-    _TOOL_SCARCITY_MIN   = 0.07   # craft sickle/pickaxe/cooking_tools if fewer than ~14
-
-    # Craft sword if ore available (swords enable merchant self-defense)
+    # Sword/plow (2 ore each) — prefer whichever is more needed
     if ore_local >= 2:
-        sword_scarcity = snapshot.scarcity("sword")
-        plow_scarcity = snapshot.scarcity("plow")
-        if sword_scarcity >= plow_scarcity and sword_scarcity >= _WEAPON_SCARCITY_MIN:
-            scores.append((0.9 * sword_scarcity, CraftAction(
+        sword_need = _need("sword")
+        plow_need  = _need("plow")
+        if sword_need > 0 and sword_need >= plow_need:
+            scores.append((0.70 + 0.25 * sword_need, CraftAction(
                 agent=agent, node_id=agent.current_node,
                 output_good="sword", inputs={"ore": 2}, output_amount=1,
             )))
-        elif plow_scarcity >= _WEAPON_SCARCITY_MIN:
-            scores.append((0.9 * plow_scarcity, CraftAction(
+        elif plow_need > 0:
+            scores.append((0.70 + 0.25 * plow_need, CraftAction(
                 agent=agent, node_id=agent.current_node,
                 output_good="plow", inputs={"ore": 2}, output_amount=1,
             )))
 
-    # Craft sickle / pickaxe / cooking_tools
+    # Single-ore tools
     if ore_local >= 1:
-        for tool, sc in [("sickle", snapshot.scarcity("sickle")),
-                         ("pickaxe", snapshot.scarcity("pickaxe")),
-                         ("cooking_tools", snapshot.scarcity("cooking_tools"))]:
-            if sc >= _TOOL_SCARCITY_MIN:
-                scores.append((0.85 * sc, CraftAction(
+        for tool in ("sickle", "pickaxe", "cooking_tools", "pruning_shears"):
+            need = _need(tool)
+            if need > 0:
+                scores.append((0.65 + 0.25 * need, CraftAction(
                     agent=agent, node_id=agent.current_node,
                     output_good=tool, inputs={"ore": 1}, output_amount=1,
                 )))
@@ -211,81 +169,56 @@ def _select_cook(agent: Agent, snapshot: WorldSnapshot) -> object:
     scores: list[tuple[float, object]] = []
 
     hunger = agent.needs.get(NeedType.HUNGER, 0.0)
-    food = _food_at_node(agent, snapshot)
-    if hunger > 0.5 and food:
-        scores.append((hunger, ConsumeFoodAction(agent=agent, food_good=food, node_id=agent.current_node)))
-    elif hunger > 0.5:
-        # No food at kitchen — collect from city.market (1-hop)
-        market = snapshot.get_node(_CITY_MARKET)
-        for good in _FOOD_GOODS_ORDER:
-            if market.stockpile.get(good, 0) > 0:
-                scores.append((hunger * 0.85, CollectFromNodeAction(
-                    agent=agent, node_id=_CITY_MARKET, good=good, qty=1,
-                )))
-                break
+    meal = _food_at_node(agent, snapshot)
+    if hunger > 0.5 and meal:
+        food, food_qty = meal
+        scores.append((hunger, ConsumeFoodAction(
+            agent=agent, food_good=food, node_id=agent.current_node, qty=food_qty,
+        )))
 
-    node = snapshot.get_node(agent.current_node)
+    node = snapshot.get_node(agent.current_node)  # == "city"
     wheat_local = node.stockpile.get("wheat", 0)
     meat_local  = node.stockpile.get("meat", 0)
-    fruit_local_cook = node.stockpile.get("fruit", 0)
+    fruit_local = node.stockpile.get("fruit", 0)
 
-    # Restock ingredients from adjacent nodes (city.market is 1 hop)
-    world = _snapshot_world(snapshot)
-    if world:
-        for edge in world_ops.edges_from(world, agent.current_node):
-            neighbor = edge.v if edge.u == agent.current_node else edge.u
-            n_node = snapshot.get_node(neighbor)
-            for good, local_qty in (("wheat", wheat_local), ("meat", meat_local), ("fruit", fruit_local_cook)):
-                if local_qty < 3:
-                    there = n_node.stockpile.get(good, 0)
-                    if there >= 2:
-                        scores.append((0.95, NodeTransferAction(
-                            agent=agent, source_node=neighbor, dest_node=agent.current_node,
-                            good=good, qty=min(5, there),
-                        )))
-
-    # Tool acquisition — cook needs cooking_tools; check kitchen then smithy
+    # Tool acquisition — cook needs cooking_tools (skip if broke)
     cook_tool_need = agent.needs.get(NeedType.TOOL_NEED, 0.0)
     if cook_tool_need > 0.2 or agent.get_tool_durability("cooking_tools") < 2.0:
-        if node.stockpile.get("cooking_tools", 0) > 0:
-            scores.append((0.95, AcquireToolAction(agent=agent, node_id=agent.current_node, tool_type="cooking_tools")))
-        else:
-            smithy = snapshot.get_node(_CITY_MARKET.replace("market", "smithy"))
-            if smithy.stockpile.get("cooking_tools", 0) > 0:
-                scores.append((0.90, AcquireToolAction(agent=agent, node_id="city.smithy", tool_type="cooking_tools")))
+        from agent_society.economy.config import BASE_VALUE
+        ct_cost = max(1, round(BASE_VALUE.get("cooking_tools", 4.0) * 1.5))
+        if node.stockpile.get("cooking_tools", 0) > 0 and agent.gold >= ct_cost:
+            scores.append((0.95, AcquireToolAction(
+                agent=agent, node_id=agent.current_node, tool_type="cooking_tools",
+            )))
 
-    fruit_local = node.stockpile.get("fruit", 0)
     scarcity = snapshot.scarcity("cooked_meal")
-    if wheat_local >= 2 and meat_local >= 1:
+    # Lighter wheat footprint: prefer wheat+meat combo (1+1) and accept fruit-based fallback.
+    if wheat_local >= 1 and meat_local >= 1:
         scores.append((0.85 * max(scarcity, 0.3), CraftAction(
             agent=agent, node_id=agent.current_node,
-            output_good="cooked_meal", inputs={"wheat": 2, "meat": 1}, output_amount=1,
+            output_good="cooked_meal", inputs={"wheat": 1, "meat": 1}, output_amount=1,
         )))
-    elif wheat_local >= 2 and fruit_local >= 1:
+    elif wheat_local >= 1 and fruit_local >= 1:
         scores.append((0.75 * max(scarcity, 0.3), CraftAction(
             agent=agent, node_id=agent.current_node,
-            output_good="cooked_meal", inputs={"wheat": 2, "fruit": 1}, output_amount=1,
+            output_good="cooked_meal", inputs={"wheat": 1, "fruit": 1}, output_amount=1,
         )))
-    elif wheat_local >= 3:
+    elif wheat_local >= 2:
         scores.append((0.6 * max(scarcity, 0.3), CraftAction(
             agent=agent, node_id=agent.current_node,
-            output_good="cooked_meal", inputs={"wheat": 3}, output_amount=1,
+            output_good="cooked_meal", inputs={"wheat": 2}, output_amount=1,
         )))
 
     return _pick_best(scores, agent)
 
 
-MERCHANT_CARRY_CAP = 10   # max inventory units before merchant heads to city
-# All farm goods delivered to city.market (single hub — crafters fetch from there)
-_FARM_COLLECT_GOODS = {"wheat", "meat", "ore", "fruit"}
+MERCHANT_CARRY_CAP = CONFIG.merchant_carry_cap
+_FARM_GOODS = {"wheat", "meat", "ore", "fruit"}
+_CITY_GOODS = {"cooked_meal", "plow", "sickle", "pickaxe", "pruning_shears"}
 
 
 def _merchant_effective_cap(agent: Agent) -> int:
-    """Carry cap minus weapons held — each weapon occupies one hand slot.
-
-    An armed merchant has less room for trade goods.  This is the primary
-    disincentive for arming: opportunity cost of cargo space.
-    """
+    """Carry cap minus weapons held — each weapon occupies one hand slot."""
     weapons_held = 1 if agent.has_usable_weapon() else 0
     return max(1, MERCHANT_CARRY_CAP - weapons_held)
 
@@ -295,88 +228,83 @@ def _select_merchant(agent: Agent, snapshot: WorldSnapshot, rng: Random) -> obje
 
     # 1. Eat first if very hungry
     hunger = agent.needs.get(NeedType.HUNGER, 0.0)
-    food = _food_at_node(agent, snapshot)
-    if hunger > 0.5 and food:
-        scores.append((hunger, ConsumeFoodAction(agent=agent, food_good=food, node_id=agent.current_node)))
+    meal = _food_at_node(agent, snapshot)
+    if hunger > 0.5 and meal:
+        food, food_qty = meal
+        scores.append((hunger, ConsumeFoodAction(
+            agent=agent, food_good=food, node_id=agent.current_node, qty=food_qty,
+        )))
 
     inv_total = sum(v for k, v in agent.inventory.items() if not k.startswith("_"))
     effective_cap = _merchant_effective_cap(agent)
-    _CITY_DISTRICTS = {"city.market", "city.smithy", "city.kitchen", "city.residential"}
-    at_city = agent.current_node in _CITY_DISTRICTS
+    at_city = agent.current_node == CITY_NODE
+    at_farm = agent.current_node == FARM_NODE
 
-    # 2a. At farm.hub: deposit cooked_meal and any tools carried from city
-    _FARM_TOOLS = ("plow", "sickle", "pickaxe", "pruning_shears")
-    if agent.current_node == "farm.hub":
-        cooked_carrying = agent.inventory.get("cooked_meal", 0)
-        if cooked_carrying > 0:
-            scores.append((0.94, DeliverToNodeAction(
-                agent=agent, deposit_node="farm.hub", good="cooked_meal", qty=cooked_carrying,
-            )))
-        for farm_tool in _FARM_TOOLS:
-            tool_carrying = agent.inventory.get(farm_tool, 0)
-            if tool_carrying > 0:
+    # 2a. At farm: deliver any city goods (cooked_meal, tools) we carried over
+    if at_farm:
+        for good in _CITY_GOODS:
+            carrying = agent.inventory.get(good, 0)
+            if carrying > 0:
                 scores.append((0.94, DeliverToNodeAction(
-                    agent=agent, deposit_node="farm.hub", good=farm_tool, qty=tool_carrying,
+                    agent=agent, deposit_node=FARM_NODE, good=good, qty=carrying,
                 )))
 
-    # 2b. At farm.hub: collect goods for city, but only when city.market actually needs them.
-    _CITY_DEMAND_CAP = 30   # don't transport if city.market already has this much
-    if agent.current_node == "farm.hub" and inv_total < effective_cap:
-        hub_node = snapshot.get_node("farm.hub")
-        city_market = snapshot.get_node("city.market")
-        for good in _FARM_COLLECT_GOODS:
-            qty = hub_node.stockpile.get(good, 0)
-            city_qty = city_market.stockpile.get(good, 0)
+    # 2b. At farm: collect farm surplus to ship to city
+    _CITY_DEMAND_CAP = CONFIG.city_demand_cap
+    if at_farm and inv_total < effective_cap:
+        farm_node = snapshot.get_node(FARM_NODE)
+        city_node = snapshot.get_node(CITY_NODE)
+        for good in _FARM_GOODS:
+            qty = farm_node.stockpile.get(good, 0)
+            city_qty = city_node.stockpile.get(good, 0)
             if qty > 5 and city_qty < _CITY_DEMAND_CAP:
                 take = min(4, qty - 5)
                 scores.append((0.90 + rng.uniform(0, 0.04), CollectFromNodeAction(
-                    agent=agent, node_id="farm.hub", good=good, qty=take,
+                    agent=agent, node_id=FARM_NODE, good=good, qty=take,
                 )))
 
-    # 3. At city district: deliver all farm goods to city.market (central hub)
+    # 3. At city: deliver farm goods we carried over
     if at_city:
-        for good in _FARM_COLLECT_GOODS:
+        for good in _FARM_GOODS:
             qty = agent.inventory.get(good, 0)
             if qty > 0:
                 scores.append((0.94, DeliverToNodeAction(
-                    agent=agent, deposit_node="city.market", good=good, qty=qty,
+                    agent=agent, deposit_node=CITY_NODE, good=good, qty=qty,
                 )))
-        # 3b. Collect city goods for return trip to farm (only when not carrying farm goods)
-        farm_goods_carried = sum(agent.inventory.get(g, 0) for g in _FARM_COLLECT_GOODS)
+
+        # 3b. Collect city surplus for return trip (only when not already loaded with farm goods)
+        farm_goods_carried = sum(agent.inventory.get(g, 0) for g in _FARM_GOODS)
         if farm_goods_carried == 0 and inv_total < effective_cap:
-            # Collect cooked_meal from city.kitchen → deliver to farm.hub
-            # Only transport when kitchen has surplus AND farm.hub is running low
-            kitchen = snapshot.get_node("city.kitchen")
-            cooked_at_kitchen = kitchen.stockpile.get("cooked_meal", 0)
-            farm_hub_cooked = snapshot.get_node("farm.hub").stockpile.get("cooked_meal", 0)
-            if cooked_at_kitchen > 15 and farm_hub_cooked < 10:
-                take = min(4, cooked_at_kitchen - 15)
+            city_node = snapshot.get_node(CITY_NODE)
+            farm_node = snapshot.get_node(FARM_NODE)
+            # Ship cooked_meal when city has surplus and farm is low
+            cooked_city = city_node.stockpile.get("cooked_meal", 0)
+            cooked_farm = farm_node.stockpile.get("cooked_meal", 0)
+            if cooked_city > 15 and cooked_farm < 10:
+                take = min(4, cooked_city - 15)
                 scores.append((0.91, CollectFromNodeAction(
-                    agent=agent, node_id="city.kitchen", good="cooked_meal", qty=take,
+                    agent=agent, node_id=CITY_NODE, good="cooked_meal", qty=take,
                 )))
-            # Collect tools from city.smithy when farm.hub is running low
-            hub = snapshot.get_node("farm.hub")
-            smithy = snapshot.get_node("city.smithy")
+            # Ship tools when farm is low on any of them
+            _FARM_TOOLS = ("plow", "sickle", "pickaxe", "pruning_shears")
             for farm_tool in _FARM_TOOLS:
-                if hub.stockpile.get(farm_tool, 0) < 3 and smithy.stockpile.get(farm_tool, 0) > 0:
-                    take = min(2, smithy.stockpile.get(farm_tool, 0))
+                if farm_node.stockpile.get(farm_tool, 0) < 3 and city_node.stockpile.get(farm_tool, 0) > 0:
+                    take = min(2, city_node.stockpile.get(farm_tool, 0))
                     scores.append((0.89, CollectFromNodeAction(
-                        agent=agent, node_id="city.smithy", good=farm_tool, qty=take,
+                        agent=agent, node_id=CITY_NODE, good=farm_tool, qty=take,
                     )))
                     break  # one tool type per trip
-        # 3d. Buy weapon when feeling unsafe and physically inside a city district.
+
+        # 3c. Buy weapon when feeling unsafe and inside the city
         safety = agent.needs.get(NeedType.SAFETY, 0.0)
         if safety > 0.25 and not agent.has_usable_weapon():
-            smithy = snapshot.get_node("city.smithy")
-            if smithy.stockpile.get("sword", 0) > 0:
+            city_node = snapshot.get_node(CITY_NODE)
+            if city_node.stockpile.get("sword", 0) > 0:
                 scores.append((0.92, AcquireWeaponAction(
-                    agent=agent, source_node="city.smithy",
+                    agent=agent, source_node=CITY_NODE,
                 )))
 
     # 4. Travel (slight rng jitter to desynchronise merchants)
-    #    Armed merchants heading for the risky route get a speed bonus: faster
-    #    delivery means more round trips, so they prioritise moving over collecting
-    #    one more unit.
     world = _snapshot_world(snapshot)
     if world:
         hop = next_hop(agent, world)
@@ -405,25 +333,27 @@ def _select_merchant(agent: Agent, snapshot: WorldSnapshot, rng: Random) -> obje
 def _select_raider(agent: RaiderFaction, snapshot: WorldSnapshot, rng: Random) -> object:
     """Raider always ambushes — eats only when starving, raids regardless of hunger.
 
-    Armory size scales aggression: more swords → higher base hit probability
-    and willingness to strike the safer route.
+    Ambush probability scales with tile proximity to hideout (see hex_map.AMBUSH_PROB).
+    Risky route tiles are checked each tick; safe route tiles only when very hungry.
     """
     hunger = agent.needs.get(NeedType.HUNGER, 0.0)
 
-    # 1. Ambush merchants on the risky route — raider territory only.
-    #    Probability < 1.0 so merchants have a chance to pass unnoticed.
-    risky_merchants = [a for a in snapshot.agents_at(RISKY_MID)
-                       if a.role == Role.MERCHANT]
-    if risky_merchants and rng.random() < AMBUSH_PROB_RISKY:
-        return RaidAction(raider=agent, target_node=RISKY_MID)
+    # 1. Check all risky route tiles — probability decreases with distance from hideout
+    for tile_id in RISKY_ROUTE_IDS:
+        prob = AMBUSH_PROB.get(tile_id, 0.0)
+        merchants = [a for a in snapshot.agents_at(tile_id) if a.role == Role.MERCHANT]
+        if merchants and rng.random() < prob:
+            return RaidAction(raider=agent, target_node=tile_id)
 
-    # 1b. Desperate hunger — extend raids to the safe route (10% per tick).
-    #     Only triggers when very hungry (>= 0.8) and merchants are present.
+    # 1b. Desperate hunger — extend raids to safe route tiles nearest the hideout
     if hunger >= 0.8:
-        safe_merchants = [a for a in snapshot.agents_at(SAFE_MID)
-                          if a.role == Role.MERCHANT]
-        if safe_merchants and rng.random() < 0.10:
-            return RaidAction(raider=agent, target_node=SAFE_MID)
+        for tile_id in SAFE_ROUTE_IDS:
+            prob = AMBUSH_PROB.get(tile_id, 0.0)
+            if prob <= 0.0:
+                continue
+            merchants = [a for a in snapshot.agents_at(tile_id) if a.role == Role.MERCHANT]
+            if merchants and rng.random() < prob:
+                return RaidAction(raider=agent, target_node=tile_id)
 
     # 2. Eat only when very hungry (after raid opportunity checked)
     if hunger > 0.6:
@@ -437,7 +367,7 @@ def _select_raider(agent: RaiderFaction, snapshot: WorldSnapshot, rng: Random) -
                 return ConsumeFoodAction(agent=agent, food_good=good, node_id=agent.current_node)
 
     # 3. Return home if strayed outside territory
-    if agent.current_node not in (RAIDER_HOME, RISKY_MID):
+    if agent.current_node not in ({RAIDER_HOME} | RISKY_TILE_SET):
         return TravelAction(agent=agent, target_node=RAIDER_HOME)
 
     return NoAction(agent=agent)
@@ -447,20 +377,14 @@ def _select_raider(agent: RaiderFaction, snapshot: WorldSnapshot, rng: Random) -
 
 # Goods eligible for gold-based arbitrage (tools handled by dedicated deliver/collect logic)
 _TRADEABLE_GOODS = ("wheat", "meat", "fruit", "ore", "cooked_meal")
+_TRADE_NODES = {CITY_NODE, FARM_NODE}
 
 
 def _merchant_market_action(
     agent: Agent,
     snapshot: WorldSnapshot,
 ) -> tuple[float, object] | None:
-    """Gold 기반 차익거래 행동 선택.
-
-    현재 노드에서:
-    - 팔 수 있는 재화가 있고 현재 노드 가격이 구매가보다 높으면 → SellAction
-    - gold가 있고 현재 노드 재화가 싸고 다른 노드에서 비싸게 팔 수 있으면 → BuyAction
-    """
-    # Only trade at proper market nodes, not route midpoints
-    _TRADE_NODES = {"city.market", "farm.hub"}
+    """Gold 기반 차익거래 — city/farm hub에서만 발동."""
     if agent.current_node not in _TRADE_NODES:
         return None
 
@@ -475,13 +399,24 @@ def _merchant_market_action(
     total_gold = sum(getattr(a, "gold", 0) for a in world.agents.values())
 
     # --- SELL: 인벤토리에 있는 재화를 현재 노드에서 팔기 ---
+    # Only proposes a SellAction if the local market actually has gold to pay
+    # — otherwise the action would fail and the merchant would loop forever
+    # on the same item with revenue=0.
+    co_located_gold = sum(
+        world.agents[aid].gold
+        for aid in world.agents_by_node.get(agent.current_node, [])
+        if aid != agent.id and aid in world.agents
+    )
+    buying_capacity = cur_node.gold + co_located_gold
+
     best_sell: tuple[float, object] | None = None
     for good in _TRADEABLE_GOODS:
         qty = agent.inventory.get(good, 0)
         if qty <= 0:
             continue
         sell_price = node_price(cur_node.stockpile, good, total_gold)
-        # 다른 노드의 구매가와 비교해 실제 차익이 있는 경우만
+        if buying_capacity < sell_price:
+            continue   # no one here can pay; come back later
         buy_prices = [
             node_price(n.stockpile, good, total_gold)
             for nid, n in world.nodes.items()
@@ -489,11 +424,13 @@ def _merchant_market_action(
         ]
         min_buy = min(buy_prices) if buy_prices else sell_price
         margin = sell_price - min_buy
-        if margin >= MERCHANT_MIN_MARGIN and cur_node.gold > 0:
-            score = 0.88 + min(0.08, margin / 20.0)
+        if margin >= MERCHANT_MIN_MARGIN:
+            # Sell only as much as the market can absorb this tick.
+            sellable_qty = min(qty, max(1, int(buying_capacity // sell_price)))
+            score = 0.95 + min(0.03, margin / 20.0)
             action = SellAction(
                 agent=agent, node_id=agent.current_node,
-                good=good, qty=qty, unit_price=sell_price,
+                good=good, qty=sellable_qty, unit_price=sell_price,
             )
             if best_sell is None or score > best_sell[0]:
                 best_sell = (score, action)
@@ -501,11 +438,13 @@ def _merchant_market_action(
     if best_sell:
         return best_sell
 
-    # --- BUY: 현재 노드에서 싼 재화를 사기 (다른 노드에서 비싸게 팔 수 있으면) ---
+    # --- BUY: 현재 노드에서 싼 재화를 사기 ---
+    _MERCHANT_GOLD_RESERVE = CONFIG.merchant_gold_reserve
     effective_cap = _merchant_effective_cap(agent)
     inv_total = sum(v for k, v in agent.inventory.items() if not k.startswith("_"))
     space = effective_cap - inv_total
-    if agent.gold <= 0 or space <= 0:
+    spendable = agent.gold - _MERCHANT_GOLD_RESERVE
+    if spendable <= 0 or space <= 0:
         return None
 
     best_buy: tuple[float, object] | None = None
@@ -521,11 +460,11 @@ def _merchant_market_action(
         max_sell = max(sell_prices) if sell_prices else buy_price
         margin = max_sell - buy_price
         if margin >= MERCHANT_MIN_MARGIN:
-            affordable = min(space, int(agent.gold // buy_price) if buy_price > 0 else 0)
+            affordable = min(space, int(spendable // buy_price) if buy_price > 0 else 0)
             qty = min(affordable, cur_node.stockpile.get(good, 0) - 2)
             if qty <= 0:
                 continue
-            score = 0.85 + min(0.08, margin / 20.0)
+            score = 0.95 + min(0.03, margin / 20.0)
             action = BuyAction(
                 agent=agent, node_id=agent.current_node,
                 good=good, qty=qty, unit_price=buy_price,
@@ -536,45 +475,83 @@ def _merchant_market_action(
     return best_buy
 
 
-def _food_at_node(agent: Agent, snapshot: WorldSnapshot) -> str | None:
+def _food_at_node(agent: Agent, snapshot: WorldSnapshot) -> tuple[str, int] | None:
+    """Pick a food to eat here and how many units to consume for one meal.
+
+    Priority:
+      1. Food in the agent's own inventory (free — wage-kept produce)
+      2. Stockpile food the agent produces themselves (free — self-sufficiency)
+      3. Stockpile food the agent can afford to buy
+    """
+    from agent_society.economy.routing import PRODUCER_OF
     node = snapshot.get_node(agent.current_node)
+
+    # 1. Inventory food — free, no gold check
     for good in FOOD_GOODS:
-        if node.stockpile.get(good, 0) > 0:
-            return good
-        if agent.inventory.get(good, 0) > 0:
-            return good
+        have = agent.inventory.get(good, 0)
+        if have <= 0:
+            continue
+        need = units_per_meal(good)
+        return good, min(need, have)
+
+    # 2. Self-produced food at node stockpile — free (farmer at farm eating wheat)
+    for good in FOOD_GOODS:
+        if PRODUCER_OF.get(good) != agent.role:
+            continue
+        avail = node.stockpile.get(good, 0)
+        if avail <= 0:
+            continue
+        need = units_per_meal(good)
+        return good, min(need, avail)
+
+    # 3. Stockpile food we have to buy — pick one we can afford a full meal of
+    world = _snapshot_world(snapshot)
+    total_gold = sum(getattr(a, "gold", 0) for a in world.agents.values()) if world else 0
+    for good in FOOD_GOODS:
+        need = units_per_meal(good)
+        avail = node.stockpile.get(good, 0)
+        if avail < need:
+            continue
+        price_per = max(1, round(node_price(node.stockpile, good, total_gold)))
+        if agent.gold >= price_per * need:
+            return good, need
+
+    # 4. Partial meal of whatever we can afford at least 1 unit of
+    for good in FOOD_GOODS:
+        avail = node.stockpile.get(good, 0)
+        if avail <= 0:
+            continue
+        price_per = max(1, round(node_price(node.stockpile, good, total_gold))) if world else 1
+        affordable = agent.gold // price_per
+        if affordable > 0:
+            return good, min(avail, affordable)
     return None
 
 
 def _best_trade_1hop(agent: Agent, snapshot: WorldSnapshot) -> TradeAction | None:
-    """Find the best TradeAction with any agent within 1-hop range."""
     others = [a for a in snapshot.agents_within_1_hop(agent.current_node)
               if a.id != agent.id]
     return _find_best_trade_with(agent, others, snapshot)
 
 
 def _best_trade_non_merchant(agent: Agent, snapshot: WorldSnapshot) -> TradeAction | None:
-    """Like _best_trade but only trades with non-merchant partners (same node)."""
     others = [a for a in snapshot.agents_at(agent.current_node)
               if a.id != agent.id and a.role != Role.MERCHANT]
     return _find_best_trade_with(agent, others, snapshot)
 
 
 def _best_trade_non_merchant_region(agent: Agent, snapshot: WorldSnapshot) -> TradeAction | None:
-    """Trade with non-merchant agents within 1-hop range."""
     others = [a for a in snapshot.agents_within_1_hop(agent.current_node)
               if a.id != agent.id and a.role != Role.MERCHANT]
     return _find_best_trade_with(agent, others, snapshot)
 
 
 def _best_trade(agent: Agent, snapshot: WorldSnapshot) -> TradeAction | None:
-    """Find the best TradeAction with a co-located agent."""
     others = [a for a in snapshot.agents_at(agent.current_node) if a.id != agent.id]
     return _find_best_trade_with(agent, others, snapshot)
 
 
 def _best_trade_region(agent: Agent, snapshot: WorldSnapshot) -> TradeAction | None:
-    """Find the best TradeAction with any co-region agent (not just same node)."""
     cur_region = snapshot.get_node(agent.current_node).region
     others = [a for a in snapshot.agents_in_region(cur_region) if a.id != agent.id]
     return _find_best_trade_with(agent, others, snapshot)

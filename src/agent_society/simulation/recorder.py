@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 
 from agent_society.config.balance import WEAPON_POWER as WEAPON_POWER_TABLE
-from agent_society.schema import AdventurerAgent, NeedType, RaiderFaction, World
+from agent_society.schema import AdventurerAgent, NeedType, PlayerAgent, RaiderFaction, World
 from agent_society.simulation.clock import tick_to_season
 
 
@@ -35,6 +35,10 @@ class AgentState:
     weapon_power: int | None = None  # combat value of equipped weapon (for display)
     active_quest: str | None = None  # AdventurerAgent/Player: currently-held quest id
     quest_progress: float | None = None  # 0.0~1.0
+    faction_id: str | None = None
+    reputation: dict[str, float] | None = None        # Player only — canonical
+    known_player_rep: dict[str, float] | None = None  # NPCs — their belief
+    current_hex: tuple[int, int] | None = None        # M7 — actual tile position
 
 
 @dataclass
@@ -90,8 +94,31 @@ class SimulationRecorder:
                 for e in world.edges
             ],
             "agents": {
-                aid: {"name": a.name, "role": a.role.value}
+                aid: {
+                    "name": a.name,
+                    "role": a.role.value,
+                    "faction": a.faction_id,
+                }
                 for aid, a in world.agents.items()
+            },
+            "factions": {
+                fid: {
+                    "name": f.name,
+                    "home_region": f.home_region,
+                    "hostile_by_default": f.hostile_by_default,
+                }
+                for fid, f in world.factions.items()
+            },
+            # M7 — dense hex-tile terrain
+            "tiles": {
+                f"{q},{r}": {
+                    "b":  t.biome.value,
+                    "rd": t.road_type.value,
+                    "ft": t.feature.value,
+                    "of": t.owner_faction,
+                    "n":  t.node_id,
+                }
+                for (q, r), t in world.tiles.items()
             },
         }
 
@@ -122,6 +149,13 @@ class SimulationRecorder:
             if isinstance(agent, AdventurerAgent):
                 active_quest = agent.active_quest_id
                 quest_progress = round(agent.quest_progress, 2) if agent.active_quest_id else None
+            # M6 — reputation / belief snapshots (only non-empty to keep JSON small)
+            reputation = None
+            if isinstance(agent, PlayerAgent) and agent.reputation:
+                reputation = {fid: round(r, 1) for fid, r in agent.reputation.items()}
+            known_rep = None
+            if agent.known_player_rep:
+                known_rep = {fid: round(r, 1) for fid, r in agent.known_player_rep.items()}
             agent_states[aid] = AgentState(
                 node=agent.current_node,
                 needs={nt.value: round(v, 3) for nt, v in agent.needs.items()},
@@ -135,6 +169,10 @@ class SimulationRecorder:
                 weapon_power=weapon_power,
                 active_quest=active_quest,
                 quest_progress=quest_progress,
+                faction_id=agent.faction_id,
+                reputation=reputation,
+                known_player_rep=known_rep,
+                current_hex=agent.current_hex,
             )
 
         # Actions
@@ -234,6 +272,10 @@ def _tick_to_dict(r: TickRecord) -> dict:
             "wp": s.weapon_power,
             "aq": s.active_quest,
             "qp": s.quest_progress,
+            "fac": s.faction_id,
+            "rep": s.reputation,
+            "krep": s.known_player_rep,
+            "hx": list(s.current_hex) if s.current_hex is not None else None,
         } for aid, s in r.agent_states.items()},
         "ac": [{
             "id": a.agent_id,

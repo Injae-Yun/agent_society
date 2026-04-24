@@ -30,6 +30,41 @@ class RegionType(Enum):
     ROUTE = "route"   # transit-only hex tiles on inter-region roads
 
 
+# ── M7 hex terrain model ─────────────────────────────────────────────────────
+
+class Biome(Enum):
+    PLAINS    = "plains"
+    HILLS     = "hills"
+    FOREST    = "forest"
+    MOUNTAIN  = "mountain"
+    COAST     = "coast"
+    WASTELAND = "wasteland"
+    URBAN     = "urban"     # settlement piece hex
+
+
+class RoadType(Enum):
+    NONE    = 0
+    PATH    = 1    # 시골길 — biome cost × 0.8
+    HIGHWAY = 2    # 주요 도로 — biome cost × 0.5
+    BRIDGE  = 3    # 강/협곡 통과 — biome cost 무시
+
+
+class TileFeature(Enum):
+    NONE   = "none"
+    RIVER  = "river"
+    RUINS  = "ruins"
+    FORD   = "ford"
+    SHRINE = "shrine"
+
+
+class SettlementTier(Enum):
+    HAMLET  = 1
+    VILLAGE = 2
+    TOWN    = 3
+    CITY    = 4
+    CAPITAL = 5
+
+
 class Tier(Enum):
     BASIC = "basic"
     PREMIUM = "premium"
@@ -91,9 +126,18 @@ class Agent:
     # Tool durability tracker: {tool_type: float 0.0~max}
     tool_durability: dict[str, float] = field(default_factory=dict)
     # Travel state: destination and ticks remaining until arrival
-    travel_destination: str | None = None
+    travel_destination: str | None = None   # current hop target (next node)
+    travel_plan: str | None = None          # ultimate multi-hop goal (e.g. a hub)
     travel_ticks_remaining: int = 0   # >0 = in transit, decrement each tick
     gold: int = 0
+    # M6 — faction membership + partial-knowledge reputation of the Player.
+    faction_id: str | None = None
+    known_player_rep: dict[str, float] = field(default_factory=dict)  # faction_id → -100..100
+    # M7 — hex-grid position + hex-walking path + fog-of-war memory.
+    current_hex: tuple[int, int] | None = None
+    travel_path: list[tuple[int, int]] = field(default_factory=list)
+    travel_step: int = 0
+    known_tiles: set[tuple[int, int]] = field(default_factory=set)
 
     def has_usable_weapon(self) -> bool:
         return self.equipped_weapon is not None and self.equipped_weapon.is_usable()
@@ -151,6 +195,84 @@ class PlayerAgent(AdventurerAgent):
 
 
 @dataclass
+class Faction:
+    """A political/social bloc in the world. Agents belong to at most one.
+
+    M6 scope: identity + home region + hostility default. Future expansions
+    (treaties, wars, trade embargos) hang off this dataclass.
+    """
+    id: str
+    name: str
+    home_region: str                     # "city" | "farmland" | "raider_base" | ...
+    hostile_by_default: bool = False     # raiders start at -40 with everyone
+    # M7 — Voronoi territory over the hex grid (populated by MapGenerator).
+    territory_centroid: tuple[int, int] | None = None
+    territory_tiles: list[tuple[int, int]] = field(default_factory=list)
+
+
+# ── M7 hex tiles + map pieces ────────────────────────────────────────────────
+
+@dataclass
+class HexTile:
+    """Per-hex terrain background. Every hex in the playable map has one."""
+    q: int
+    r: int
+    biome: "Biome" = field(default=None)                 # type: ignore[assignment]
+    elevation: int = 0
+    owner_faction: str | None = None
+    road_type: "RoadType" = field(default=None)          # type: ignore[assignment]
+    feature: "TileFeature" = field(default=None)         # type: ignore[assignment]
+    node_id: str | None = None          # Node overlay, if any
+    raid_risk: float = 0.0              # 0~1 — per-tick ambush probability for
+                                        # merchants passing through
+
+    def __post_init__(self) -> None:
+        # Dataclass forward-ref defaults: assign real enum values at init.
+        if self.biome is None:
+            self.biome = Biome.PLAINS
+        if self.road_type is None:
+            self.road_type = RoadType.NONE
+        if self.feature is None:
+            self.feature = TileFeature.NONE
+
+
+@dataclass
+class PieceHex:
+    """One hex inside a MapPiece template — offset from piece anchor."""
+    dq: int
+    dr: int
+    biome: "Biome" = field(default=None)                 # type: ignore[assignment]
+    role: str = "field"            # "center" | "gate" | "field" | "market" | ...
+    is_gate: bool = False          # external road connection point
+
+    def __post_init__(self) -> None:
+        if self.biome is None:
+            self.biome = Biome.URBAN
+
+
+@dataclass
+class MapPiece:
+    """A pre-designed hex cluster: a settlement, raider lair, or landmark.
+
+    Generator picks pieces matching biome/faction and stamps them onto
+    the world's tile grid. Pieces with `spawns_node=True` also create a
+    Node anchored at the piece centre.
+    """
+    id: str
+    kind: str                               # "city" | "village" | "raider_lair" | "landmark"
+    tier: SettlementTier
+    hexes: list[PieceHex]
+    biome_compat: list["Biome"] = field(default_factory=list)
+    faction_eligibility: list[str] = field(default_factory=list)
+    rarity: int = 1
+    agent_seeds: list[dict] = field(default_factory=list)
+    requires_road_adjacent: bool = False    # raider lairs are placed *after* roads
+    spawns_node: bool = True
+    is_landmark: bool = False               # shrine / ruin — Node created but
+                                            # no agents seeded; quest-only interest
+
+
+@dataclass
 class World:
     nodes: dict[str, Node]
     edges: list[Edge]
@@ -160,3 +282,7 @@ class World:
     # Derived indices — rebuilt by world.py methods
     agents_by_node: dict[str, list[str]] = field(default_factory=dict)
     agents_by_role: dict[Role, list[str]] = field(default_factory=dict)
+    # M6 — faction registry (id → Faction)
+    factions: dict[str, Faction] = field(default_factory=dict)
+    # M7 — dense hex-tile grid keyed by axial (q, r).
+    tiles: dict[tuple[int, int], HexTile] = field(default_factory=dict)

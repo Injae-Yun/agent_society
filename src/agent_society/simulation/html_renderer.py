@@ -276,6 +276,13 @@ function calibrate() {{
     for (const [q, r] of hexList) addPoint(q, r);
   }}
   for (const [q, r] of HIDEOUT_TERRITORY) addPoint(q, r);
+  // M7 — include the dense tile grid so the camera fits the whole map.
+  if (meta.tiles) {{
+    for (const key of Object.keys(meta.tiles)) {{
+      const [qs, rs] = key.split(',');
+      addPoint(parseInt(qs), parseInt(rs));
+    }}
+  }}
 
   const PAD = 2.0;
   const rangeX = maxX - minX + PAD * 2;
@@ -372,31 +379,60 @@ function initSVG() {{
   const HIDEOUT_SIZE  = HEX_SIZE * 0.92;
   const BIG_HEX_SIZE  = HEX_SIZE * 2.0;    // city/farm centre — encompasses 7 hex cluster
 
-  // ── Layer 0: hideout territory (dark raider zone) ────────────────────────
-  const hideoutBg = svgGroup('g-hideout-bg');
-  for (const [q, r] of HIDEOUT_TERRITORY) {{
-    const [cx, cy] = axialToPixel(q, r);
-    hideoutBg.appendChild(makeSVG('path', {{
-      d: hexPath(cx, cy, CLUSTER_SIZE + 1),
-      fill: '#200000', stroke: '#5a0000', 'stroke-width': 1,
-    }}));
-  }}
-  zRoot.appendChild(hideoutBg);
-
-  // ── Layer 1: cluster slot backgrounds (role visual slots) ────────────────
-  const clusterBg = svgGroup('g-cluster-bg');
-  for (const [clId, hexList] of Object.entries(CLUSTER_HEXES)) {{
-    const fill   = clId === 'city' ? '#0d2240' : '#0d2d0d';
-    const stroke = clId === 'city' ? '#1a3a6a' : '#1a4a1a';
-    for (const [q, r] of hexList) {{
+  // ── Layer 0: terrain tiles (M7 hex grid) ─────────────────────────────────
+  const BIOME_COLOR = {{
+    plains:    '#2a3d1e',
+    hills:     '#3d3a1e',
+    forest:    '#1a3320',
+    mountain:  '#454550',
+    coast:     '#1a2f4a',
+    wasteland: '#3d1a1a',
+    urban:     '#1d2a44',
+  }};
+  const ROAD_STROKE = {{ 1: '#8a6d3f', 2: '#c0a060', 3: '#7a7a9a' }};
+  const tileGroup = svgGroup('g-tiles');
+  if (meta.tiles) {{
+    for (const [key, tile] of Object.entries(meta.tiles)) {{
+      const [qs, rs] = key.split(',');
+      const q = parseInt(qs), r = parseInt(rs);
       const [cx, cy] = axialToPixel(q, r);
-      clusterBg.appendChild(makeSVG('path', {{
+      const fill = BIOME_COLOR[tile.b] || '#252525';
+      tileGroup.appendChild(makeSVG('path', {{
+        d: hexPath(cx, cy, CLUSTER_SIZE),
+        fill, stroke: '#111', 'stroke-width': 0.5,
+        'data-key': key,
+      }}));
+      if (tile.rd && tile.rd > 0) {{
+        // Small road disc in the centre — colour by road tier.
+        tileGroup.appendChild(makeSVG('circle', {{
+          cx, cy, r: HEX_SIZE * (tile.rd === 2 ? 0.28 : 0.20),
+          fill: ROAD_STROKE[tile.rd] || '#8a6d3f',
+          opacity: 0.55,
+        }}));
+      }}
+    }}
+  }} else {{
+    // Legacy fallback: no tile grid → use old cluster/hideout backgrounds.
+    for (const [q, r] of HIDEOUT_TERRITORY) {{
+      const [cx, cy] = axialToPixel(q, r);
+      tileGroup.appendChild(makeSVG('path', {{
         d: hexPath(cx, cy, CLUSTER_SIZE + 1),
-        fill, stroke, 'stroke-width': 1,
+        fill: '#200000', stroke: '#5a0000', 'stroke-width': 1,
       }}));
     }}
+    for (const [clId, hexList] of Object.entries(CLUSTER_HEXES)) {{
+      const fill   = clId === 'city' ? '#0d2240' : '#0d2d0d';
+      const stroke = clId === 'city' ? '#1a3a6a' : '#1a4a1a';
+      for (const [q, r] of hexList) {{
+        const [cx, cy] = axialToPixel(q, r);
+        tileGroup.appendChild(makeSVG('path', {{
+          d: hexPath(cx, cy, CLUSTER_SIZE + 1),
+          fill, stroke, 'stroke-width': 1,
+        }}));
+      }}
+    }}
   }}
-  zRoot.appendChild(clusterBg);
+  zRoot.appendChild(tileGroup);
 
   // ── Layer 1b: role-slot labels ("Smithy", "Grain", ...) ──────────────────
   const slotLabels = svgGroup('g-slot-labels');
@@ -592,11 +628,23 @@ function updateStockBubbles(rec) {{
 }}
 
 function updateAgentPositions(rec) {{
-  // Group agents by (visual hex), not logical node — so city/farm role slots are separate groups.
+  // Group agents by their actual hex tile so each hex's dots stack together.
+  // Priority: state.hx (M7 hex coord) → ROLE_OFFSET (legacy city/farm slot)
+  //           → node centre.
+  function _slotKey(state, role) {{
+    if (state.hx) return 'hx:' + state.hx[0] + ',' + state.hx[1];
+    if (ROLE_OFFSET[state.n + '|' + role]) return state.n + '|' + role;
+    return state.n;
+  }}
+  function _slotXY(state, role) {{
+    if (state.hx) return axialToPixel(state.hx[0], state.hx[1]);
+    return agentXY(state.n, role);
+  }}
+
   const byKey = {{}};
   for (const [aid, as_] of Object.entries(rec.as)) {{
     const role = meta.agents[aid]?.role || '';
-    const slotKey = ROLE_OFFSET[as_.n + '|' + role] ? (as_.n + '|' + role) : as_.n;
+    const slotKey = _slotKey(as_, role);
     (byKey[slotKey] = byKey[slotKey] || []).push(aid);
   }}
 
@@ -608,10 +656,10 @@ function updateAgentPositions(rec) {{
     const state = rec.as[aid];
     if (!state) continue;
 
-    const slotKey = ROLE_OFFSET[state.n + '|' + role] ? (state.n + '|' + role) : state.n;
+    const slotKey = _slotKey(state, role);
     const group = byKey[slotKey] || [aid];
     const idx = group.indexOf(aid);
-    const [cx, cy] = agentXY(state.n, role);
+    const [cx, cy] = _slotXY(state, role);
     const count = group.length;
 
     let dx = 0, dy = 0;
@@ -769,7 +817,27 @@ function renderAgentDetail(aid, rec) {{
   const nodeNm = meta.nodes[state.n]?.name || state.n;
   const goldBadge = (state.gold || 0) > 0
     ? `<span style="color:#FFD700;font-weight:bold;margin-left:8px;">💰 ${{state.gold}}g</span>` : '';
-  let html = `<div style="font-size:11px;color:#aaa;margin-bottom:6px;">${{agent.role}} · ${{nodeNm}}${{goldBadge}}</div>`;
+  const facBadge = state.fac
+    ? `<span style="background:#2a3a5a;color:#8fb3ff;padding:1px 6px;border-radius:3px;margin-left:8px;font-size:10px;">⚑ ${{state.fac}}</span>` : '';
+  let html = `<div style="font-size:11px;color:#aaa;margin-bottom:6px;">${{agent.role}} · ${{nodeNm}}${{goldBadge}}${{facBadge}}</div>`;
+
+  // M6 — reputation block
+  const repMap = state.rep || state.krep;
+  if (repMap && Object.keys(repMap).length) {{
+    const title = state.rep ? '세력 명성 (canon)' : '세력 명성 (소문)';
+    html += `<div style="font-size:11px;color:#aaa;margin:4px 0 2px;">${{title}}</div>`;
+    for (const [fid, val] of Object.entries(repMap)) {{
+      const v = Math.round(val);
+      const tier = v >= 60 ? 'hero' : v >= 30 ? 'friend' : v <= -60 ? 'enemy' : v <= -30 ? 'wary' : 'neutral';
+      const col = tier === 'hero' ? '#FFD700' : tier === 'friend' ? '#4CAF50'
+                : tier === 'enemy' ? '#F44336' : tier === 'wary' ? '#FF9800' : '#888';
+      const pct = Math.min(100, Math.abs(v));
+      html += `<div class="need-bar">
+        <span class="label" style="color:${{col}};">⚑ ${{fid}}</span>
+        <div class="bar-bg"><div class="bar-fill" style="width:${{pct}}%;background:${{col}};"></div></div>
+        <span style="font-size:10px;min-width:36px;color:${{col}};">${{v >= 0 ? '+' : ''}}${{v}}</span></div>`;
+    }}
+  }}
 
   const needColors = {{hunger:'#F44336',food_satisfaction:'#FF9800',tool_need:'#9C27B0',safety:'#2196F3'}};
   const needNames  = {{hunger:'허기',food_satisfaction:'식욕만족',tool_need:'도구부족',safety:'안전'}};

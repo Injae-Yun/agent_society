@@ -29,6 +29,7 @@ from agent_society.economy.config import BASE_VALUE
 from agent_society.economy.exchange import node_price
 from agent_society.events.bus import WorldEventBus
 from agent_society.events.types import EventSeverity, QuestAccepted, QuestResolved
+from agent_society.factions.reputation import apply_quest_completion_reputation
 from agent_society.game.dice import (
     CheckOutcome,
     CheckResult,
@@ -248,6 +249,9 @@ def _complete_quest(player, world, bus, quest_gen, rng, narrator: QuestNarrator)
     player.gold += reward_gold
     player.quest_log.append(quest.id)
 
+    # M6 — update faction reputation based on quest supporters
+    rep_deltas = apply_quest_completion_reputation(world, quest, player, mult)
+
     player.active_quest_id = None
     player.quest_progress = 0.0
 
@@ -260,7 +264,7 @@ def _complete_quest(player, world, bus, quest_gen, rng, narrator: QuestNarrator)
     )
     story = narrator.narrate_resolution(resolution)
     effect = {**effect, "check": check.outcome.value, "roll": check.roll,
-              "dc": check.dc, "story": story}
+              "dc": check.dc, "story": story, "rep_deltas": rep_deltas}
 
     bus.publish(QuestResolved(
         tick=world.tick, source="player", severity=EventSeverity.INFO,

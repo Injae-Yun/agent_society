@@ -10,7 +10,7 @@ from agent_society.agents.raider import raid_resolution
 from agent_society.economy.config import BASE_VALUE, CONFIG
 from agent_society.events.bus import WorldEventBus
 from agent_society.events.types import EventSeverity, RaidAttempt
-from agent_society.schema import Agent, Item, NeedType, RaiderFaction, Tier, World
+from agent_society.schema import Agent, Item, NeedType, RaiderFaction, Role, Tier, World
 from agent_society.world import world as world_ops
 
 log = logging.getLogger(__name__)
@@ -243,20 +243,85 @@ class TravelAction:
     action_type: str = field(default="travel", init=False)
 
     def execute(self, world: World, bus: WorldEventBus) -> dict:
+        """Kick off a hex-walking traversal toward target_node.
+
+        Computes an A* path across world.tiles and stores it on the agent.
+        The path is walked one hex per tick inside AgentSociety._tick_agent;
+        agent.current_node only updates on arrival.
+        """
         if self.target_node not in world.nodes:
             return {}
-        # Determine travel cost from edge (default 1 for internal hops)
-        edge_cost = 1
-        for edge in world.edges:
-            if ((edge.u == self.agent.current_node and edge.v == self.target_node) or
-                    (edge.v == self.agent.current_node and edge.u == self.target_node)):
-                edge_cost = max(0, edge.travel_cost)
-                break
+        target = world.nodes[self.target_node]
+
+        # Legacy fallback — no hex metadata available, instant snap.
+        if target.hex_q is None or target.hex_r is None or not world.tiles:
+            prev = self.agent.current_node
+            world_ops.move_agent(world, self.agent.id, self.target_node)
+            self.agent.current_node = self.target_node
+            if target.hex_q is not None:
+                self.agent.current_hex = (target.hex_q, target.hex_r)
+            return {"_travel": {"from": prev, "to": self.target_node, "cost": 1}}
+
+        # Derive the agent's starting hex (init from current_node if missing).
+        start = self.agent.current_hex
+        if start is None:
+            cur_node = world.nodes.get(self.agent.current_node)
+            if cur_node and cur_node.hex_q is not None:
+                start = (cur_node.hex_q, cur_node.hex_r)
+                self.agent.current_hex = start
+            else:
+                prev = self.agent.current_node
+                world_ops.move_agent(world, self.agent.id, self.target_node)
+                self.agent.current_node = self.target_node
+                return {"_travel": {"from": prev, "to": self.target_node, "cost": 1}}
+
+        goal = (target.hex_q, target.hex_r)
+
+        # Already there — nothing to do.
+        if start == goal:
+            if self.agent.current_node != self.target_node:
+                prev = self.agent.current_node
+                world_ops.move_agent(world, self.agent.id, self.target_node)
+                self.agent.current_node = self.target_node
+                return {"_travel": {"from": prev, "to": self.target_node, "cost": 0}}
+            return {}
+
+        from agent_society.world.tiles import a_star
+        path = a_star(world.tiles, start, goal)
+        if not path or len(path) < 2:
+            # Unreachable on the tile grid — legacy snap fallback.
+            prev = self.agent.current_node
+            world_ops.move_agent(world, self.agent.id, self.target_node)
+            self.agent.current_node = self.target_node
+            self.agent.current_hex = goal
+            return {"_travel": {"from": prev, "to": self.target_node, "cost": 1}}
+
+        # Stash the path + take the first step this tick (so 1-hex moves cost
+        # exactly 1 tick, not 2 — the previous "select + transit" pattern).
         prev = self.agent.current_node
-        world_ops.move_agent(world, self.agent.id, self.target_node)
-        self.agent.travel_ticks_remaining = max(0, edge_cost - 1)  # 0 = instant (intra-cluster)
-        log.debug("Agent %s: %s → %s (cost=%d)", self.agent.id, prev, self.target_node, edge_cost)
-        return {"_travel": {"from": prev, "to": self.target_node, "cost": edge_cost}}
+        self.agent.travel_destination = self.target_node
+        self.agent.travel_path = path
+        self.agent.travel_step = 1
+        self.agent.current_hex = path[1]
+        self.agent.travel_ticks_remaining = len(path) - 2
+        self.agent.known_tiles.add(path[1])
+
+        # Single-hex path → arrived now.
+        if self.agent.travel_step >= len(path) - 1:
+            world_ops.move_agent(world, self.agent.id, self.target_node)
+            self.agent.current_node = self.target_node
+            self.agent.current_hex = path[-1]
+            self.agent.travel_path = []
+            self.agent.travel_step = 0
+            self.agent.travel_ticks_remaining = 0
+            self.agent.travel_destination = None
+
+        log.debug("Agent %s travel: %s → %s (hex path len %d)",
+                  self.agent.id, prev, self.target_node, len(path) - 1)
+        return {"_travel": {
+            "from": prev, "to": self.target_node,
+            "hex_path_len": len(path) - 1,
+        }}
 
 
 @dataclass
@@ -294,6 +359,68 @@ class RaidAction:
                           "defense": combat_info["defense"],
                           "armory": combat_info["armory"]},
                 self.target_node: delta}
+
+
+@dataclass
+class RaidMerchantAction:
+    """Ambush a specific merchant on a road hex (M7 procedural raids).
+
+    Unlike `RaidAction` which targets a Node's stockpile, this targets the
+    merchant's personal inventory directly. Co-located defenders (other
+    merchants at the same hex) add their weapons to the defense pool, so
+    a caravan of three is meaningfully safer than a lone trader.
+    """
+    raider: RaiderFaction
+    target_agent_id: str
+    road_hex: tuple[int, int]
+    action_type: str = field(default="raid", init=False)
+
+    def execute(self, world: World, bus: WorldEventBus) -> dict:
+        target = world.agents.get(self.target_agent_id)
+        if target is None:
+            return {}
+        # Co-located merchants mount a joint defense.
+        defenders = [
+            a for a in world.agents.values()
+            if a.current_hex == self.road_hex
+            and a.id != self.raider.id
+            and a.role == Role.MERCHANT
+        ]
+        if target not in defenders:
+            defenders.append(target)
+
+        # raid_resolution mutates defender inventories in place; pass an empty
+        # stockpile since there's no fixed cache on a road hex.
+        result, loot, combat_info = raid_resolution(
+            self.raider, defenders, {},
+        )
+        for good, qty in loot.items():
+            self.raider.inventory[good] = self.raider.inventory.get(good, 0) + qty
+
+        # Everyone at the road hex spikes safety; wider merchant network hears
+        # about it too.
+        for v in defenders:
+            v.needs[NeedType.SAFETY] = min(1.0, v.needs.get(NeedType.SAFETY, 0.0) + 0.4)
+        for a in world.agents.values():
+            if a.role == Role.MERCHANT and a.id != target.id:
+                a.needs[NeedType.SAFETY] = min(1.0, a.needs.get(NeedType.SAFETY, 0.0) + 0.15)
+
+        bus.publish(RaidAttempt(
+            tick=world.tick, source="agent_society",
+            severity=EventSeverity.MAJOR,
+            target_node=target.current_node or "",
+            result=result, loot=loot,
+        ))
+        log.info("Road raid on %s @%s: %s atk=%.1f def=%d loot=%s",
+                 target.id, self.road_hex, result,
+                 combat_info["attack"], combat_info["defense"], loot)
+        return {"_raid": {
+            "result": result, "loot": loot, "target": target.id,
+            "hex": list(self.road_hex),
+            "attack": combat_info["attack"],
+            "defense": combat_info["defense"],
+            "armory": combat_info["armory"],
+        }}
 
 
 @dataclass

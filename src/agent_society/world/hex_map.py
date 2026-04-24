@@ -82,28 +82,44 @@ CLUSTER_ID: dict[str, str] = {
 }
 
 # ── Role visual slots inside a zone ───────────────────────────────────────────
-# All 6 neighbour slots of each zone are free (no route overlap), so every
-# producer role gets its own hex.
+# Slots are now positioned so that the two route-entry neighbours are left
+# empty — those hexes act as PATH gates that agents prefer when walking in/out.
 #
-# City (0,0):   NE=(1,-1)  N=(0,-1)  W=(-1,0)  SW=(-1,1)  S=(0,1)  E=(1,0)
-# Farm (7,-2):  NE=(8,-3)  N=(7,-3)  W=(6,-2)  SW=(6,-1)  S=(7,-1) E=(8,-2)
+# City (0,0)  routes enter from NE (risky.1 at (2,-2)) and SW (safe.1 at (-1,2))
+#    → NE=(1,-1) and SW=(-1,1) are the gates (kept empty, painted PATH).
+# Farm (7,-2) routes enter from W  (risky.4 at (5,-2)) and S  (safe.10 at (6,0))
+#    → W=(6,-2) and S=(7,-1) are the gates.
 
 ROLE_VISUAL_OFFSET: dict[tuple[str, str], tuple[int, int]] = {
-    # ── City ─────────────────────────────────────────────────────────────────
-    ("city", "blacksmith"):  (1, -1),  # NE — smithy
-    ("city", "cook"):        (0, -1),  # N  — kitchen
-    ("city", "merchant"):    (0,  0),  # market gate (centre)
-    ("city", "adventurer"):  (-1, 1),  # SW — guild hall
-    ("city", "player"):      (-1, 0),  # W  — adventurer's lodge (player starts here)
-    # S (0,1) free for residential / future roles.
-    # ── Farm ─────────────────────────────────────────────────────────────────
-    ("farm", "farmer"):     (7, -3),   # N  — grain field
-    ("farm", "herder"):     (8, -3),   # NE — pasture
-    ("farm", "orchardist"): (6, -1),   # SW — orchard
-    ("farm", "miner"):      (7, -1),   # S  — mine
-    ("farm", "merchant"):   (7, -2),   # E  — hub gate
-    # W (6,-2) free.
+    # ── City ─ non-gate neighbours only ──────────────────────────────────────
+    ("city", "blacksmith"):  (0, -1),   # N  — smithy
+    ("city", "cook"):        (1,  0),   # E  — kitchen
+    ("city", "merchant"):    (0,  0),   # centre — market gate
+    ("city", "adventurer"):  (0,  1),   # S  — guild hall
+    ("city", "player"):      (-1, 0),   # W  — adventurer's lodge
+    # NE (1,-1) = risky gate (empty), SW (-1,1) = safe gate (empty)
+    # ── Farm ─ non-gate neighbours only ──────────────────────────────────────
+    ("farm", "farmer"):      (7, -3),   # N  — grain field
+    ("farm", "herder"):      (8, -3),   # NE — pasture
+    ("farm", "miner"):       (8, -2),   # E  — mine
+    ("farm", "orchardist"):  (6, -1),   # SW — orchard
+    ("farm", "merchant"):    (7, -2),   # centre — hub
+    # W (6,-2) = risky gate (empty), S (7,-1) = safe gate (empty)
 }
+
+
+# ── Zone gate hexes ──────────────────────────────────────────────────────────
+# The builder paints these with RoadType.PATH so A* prefers exiting a zone
+# through its gate hex instead of trampling a producer slot.
+
+GATE_HEXES: frozenset[tuple[int, int]] = frozenset({
+    # City gates
+    (1, -1),    # NE — opens onto risky.1 = (2, -2)
+    (-1, 1),    # SW — opens onto safe.1  = (-1, 2)
+    # Farm gates
+    (6, -2),    # W  — opens onto risky.4 = (5, -2)
+    (7, -1),    # S  — opens onto safe.10 = (6, 0)
+})
 
 
 def visual_position(node_id: str, role: str) -> tuple[int, int]:

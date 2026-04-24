@@ -22,9 +22,10 @@ NPC 사회가 자율적으로 돌아가는 월드 안에서 플레이어가 1명
 | **M2** | ✅ 완료 | Quest 시스템 + LLM 연결 |
 | **M3** | ✅ 완료 | 화폐 + 시장 가격 시스템 |
 | **M4** | ✅ 완료 | AdventurerAgent + Quest 효과 (자원 평형 자동화) |
-| **M5** | 🔲 다음 | PlayerAgent (AdventurerAgent와 quest 시스템 공유) |
-| M6 | 🔲 예정 | 세력(Faction) + 명성 시스템 |
-| M7 | 🔲 예정 | 맵 확장 (다중 도시·국가) |
+| **M5** | ✅ 완료 | PlayerAgent + d20 주사위 + LLM 결과 서사 |
+| **M6** | ✅ 완료 | 세력(Faction) + 명성·소문 전파 초기 틀 |
+| **M7** | ✅ 완료 | 절차적 맵 생성 + Voronoi/biome/roads/lair + generate_world 통합 |
+| M8 | 🔲 다음 | 엔딩 조건 + 게임 루프 완성 |
 | M8 | 🔲 예정 | 엔딩 조건 + 게임 루프 완성 |
 
 ---
@@ -334,61 +335,76 @@ Adventurer와 동일한 경로. Player 전용 차이:
 
 ---
 
-## M6 — 세력(Faction) + 명성 시스템
+## M6 — 세력(Faction) + 명성 시스템 (완료)
 
-### 목표
-월드에 소속(세력)이 생기고, 플레이어의 명성이 세력별로 관리된다.
+### 구현 요약
+- `Faction` dataclass (id, name, home_region, hostile_by_default)
+- 기본 3 factions (`civic`, `rural`, `raiders`) + role 기반 자동 매핑
+- `Agent.faction_id`, `Agent.known_player_rep` 추가
+- `factions/reputation.py`:
+  - `apply_quest_completion_reputation()` — player.reputation 업데이트 + 의뢰자 직접 전파
+  - `propagate_rumors()` — 같은 노드 agents 간 소문 (prob=0.08, decay=0.85)
+  - `reputation_tier()` — hero/friend/neutral/wary/enemy 분류
+- `AgentSociety`가 하루 1회 `propagate_rumors()` 호출
+- `Player._complete_quest`에서 outcome_mult 반영해 reputation hook 호출
+- recorder / HTML detail panel에 `reputation` (player canonical) / `known_player_rep` (NPC 소문) 표시
 
-### 설계
-
-#### Faction
-```python
-@dataclass
-class Faction:
-    id: str
-    name: str
-    home_region: str          # 거점 node
-    member_ids: list[str]     # 소속 agent id
-```
-
-#### 명성 전파 (부분 지식 모델)
-- 플레이어와 **직접 상호작용**한 agent만 실제 명성을 앎.
-- 같은 node에 있는 agent끼리 일정 확률로 명성 정보를 공유 (소문).
-- agent는 자신이 아는 명성만 가격·태도에 반영.
-
-```python
-# Agent에 추가
-known_player_rep: dict[str, float] = field(default_factory=dict)  # faction_id → rep
-```
-
-#### 명성 효과
-| 명성 구간 | 효과 |
-|---|---|
-| +60 이상 | 해당 세력 NPC 가격 10% 할인, 전용 퀘스트 해금 |
-| +30 ~ +60 | 우호적 대화, 정보 공개 |
-| -30 ~ +30 | 중립 |
-| -60 이하 | 거래 거부, 전투 선제 공격 |
-
-#### 명성 변화 이벤트
-- 퀘스트 완료 → 의뢰자 세력 명성 +10~30 (urgency 비례)
-- 퀘스트 실패/만료 → 의뢰자 세력 명성 -5
-- 상인 약탈 → 피해 세력 명성 -20
+### 🔲 M6 후속 작업 (백로그)
+- **가격 효과**: `node_price()`에 buyer reputation 반영 (hero 10% 할인 / enemy 거래 거부)
+- **전투 태도**: enemy tier (≤ -60) agent가 player 선제공격 / 거래 거부
+- **Heroic quest 조건 확장**: 명성 +60 이상에서 특정 tier quest 해금
+- **명성 감소**: 퀘스트 expired / 상인 약탈 가담 등 -rep 이벤트
 
 ---
 
-## M7 — 맵 확장 (다중 도시·국가)
+## M7 — 절차적 맵 생성 + 다중 도시·국가
 
 ### 목표
-3-node 선형 맵 → 다중 도시 그래프. agent 수 확장.
+현재 hand-authored 2-hub 맵 → **seed 기반 절차적 생성**으로 전환.
+Faction 상호작용이 의미 있으려면 지역 간 거리·지형·희소자원 분포가 **매 run마다 달라야** 한다 (리플레이성).
 
-### 확장 단계
-1. **도시 추가**: 새 node + edge (config yaml로 정의)
-2. **국가(State) 개념**: Faction의 상위 레벨. 외교 상태(전쟁·화평)
-3. **agent 수 스케일**: 50 → 200+ (성능 검증 병행)
+### 왜 절차적 생성인가
+- **리플레이성**: 같은 game loop도 seed마다 다른 세계 → 플레이어가 반복 플레이 가치
+- **faction 상호작용**: 2-hub 구조에선 세력 간 거리·접경 같은 개념이 없음. 여러 도시가 있어야 동맹·분쟁이 공간적으로 의미를 가짐
+- **이벤트 다양성**: 자원 분포에 따라 quest 타입이 동적으로 조정됨 (ore가 먼 도시면 delivery quest 빈번 등)
+
+### 생성 파이프라인
+```
+seed → MapGenerator
+       ├─ 1. region layout   : Poisson-disk sampling으로 도시/팜/raider 거점 배치
+       ├─ 2. terrain         : 노드별 biome 태그 (plains / hills / forest / wasteland)
+       ├─ 3. resources       : biome 기반 stockpile 편향
+       │                      (forest: wheat+fruit, hills: ore, coast: fish*…)
+       ├─ 4. routes          : Delaunay 삼각분할 → MST + 일부 추가 edge (최소 연결 + 우회로)
+       ├─ 5. faction assign  : 도시 별 faction (인접 도시끼리 같은 faction 확률 ↑)
+       └─ 6. agent seeding   : role별 population 공식 + region 선호
+```
+
+### 구현 파일 (신규)
+| 파일 | 책임 |
+|---|---|
+| `world/generation/layout.py` | Poisson-disk region centroid sampling |
+| `world/generation/biomes.py` | biome enum + stockpile bias tables |
+| `world/generation/routes.py` | Delaunay/MST 기반 edge 구성 |
+| `world/generation/factions.py` | 도시-세력 매핑 (Voronoi / cluster) |
+| `world/generation/generator.py` | 파이프라인 orchestrator (`generate_world(seed, size)`) |
+| `configs/procedural.yaml` | generator 파라미터 (도시 수, biome 가중치 등) |
+
+### 단계적 접근
+1. **M7a — 스켈레톤**: 3~5 도시 랜덤 배치, 기존 role/faction 체계 재사용, hand-authored MVP와 동등한 동작
+2. **M7b — biome/resource 편향**: 노드별 자원 편향 도입, merchant 경로가 다양화되는지 검증
+3. **M7c — 국가(State) 개념**: Faction의 상위 레벨 (외교 상태: 전쟁·화평·교역). 접경 도시에서 관세·이동 제한
+4. **M7d — agent 수 스케일**: 50 → 200+ (성능 검증 병행)
 
 ### 성능 목표
 - LLM 없는 1 tick: < 50ms (200 agent 기준)
 - QuestGenerator (LLM 포함): < 30s / 168 tick 주기
+- 맵 생성: < 1초 (seed 기반 결정론)
+
+### 리플레이성 메트릭 (검증용)
+- 같은 seed → 동일 맵 (결정론)
+- 다른 seed → 도시 수·배치·자원 분포 측정 다양성 (KL divergence ≥ 임계)
+- faction 지배권 패턴이 seed마다 달라지는지 (도시 별 dominant faction diversity)
 
 ---
 

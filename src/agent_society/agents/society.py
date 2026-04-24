@@ -7,8 +7,10 @@ from random import Random
 
 from agent_society.agents.needs import decay_needs
 from agent_society.agents.selection import select_action
+from agent_society.config.parameters import TICK_PER_DAY
 from agent_society.events.bus import WorldEventBus
 from agent_society.events.handlers import register_all_handlers
+from agent_society.factions.reputation import propagate_rumors
 from agent_society.schema import AdventurerAgent, PlayerAgent, RaiderFaction, World
 from agent_society.world.snapshot import WorldSnapshot
 
@@ -37,6 +39,49 @@ class AgentSociety:
         """Wire the player input source after construction."""
         self._player_interface = player_interface
 
+    # ── M7 — hex-walking ──────────────────────────────────────────────────────
+
+    def _advance_travel(self, agent, world: World) -> None:
+        """Step the agent one hex forward along travel_path; settle on arrival."""
+        if agent.travel_path:
+            agent.travel_step += 1
+            if agent.travel_step < len(agent.travel_path):
+                agent.current_hex = agent.travel_path[agent.travel_step]
+                self._reveal(agent, world)
+            # Arrival (step == last index)
+            if agent.travel_step >= len(agent.travel_path) - 1:
+                final_hex = agent.travel_path[-1]
+                agent.current_hex = final_hex
+                dest = agent.travel_destination
+                if dest and dest in world.nodes and agent.current_node != dest:
+                    from agent_society.world import world as world_ops
+                    world_ops.move_agent(world, agent.id, dest)
+                    agent.current_node = dest
+                agent.travel_path = []
+                agent.travel_step = 0
+                agent.travel_ticks_remaining = 0
+                agent.travel_destination = None
+                self._reveal(agent, world)
+            else:
+                agent.travel_ticks_remaining = max(
+                    0, len(agent.travel_path) - 1 - agent.travel_step,
+                )
+        else:
+            # No path but counter ticking — legacy decrement
+            agent.travel_ticks_remaining = max(0, agent.travel_ticks_remaining - 1)
+
+    @staticmethod
+    def _reveal(agent, world: World) -> None:
+        """Reveal known_tiles around the agent's current hex."""
+        from agent_society.economy.config import CONFIG
+        from agent_society.world.tiles import reveal_area
+        if agent.current_hex is None:
+            return
+        reveal_area(
+            agent.known_tiles, agent.current_hex,
+            CONFIG.vision_radius_hex, world.tiles,
+        )
+
     def tick(self, world: World) -> list[tuple[str, object]]:
         """Run one tick for all agents (ID-ascending). Returns [(agent_id, action)] for recorder."""
         snapshot = WorldSnapshot(world)
@@ -50,6 +95,10 @@ class AgentSociety:
             except Exception:
                 log.exception("Error ticking agent %s — skipping", agent_id)
 
+        # Daily rumor propagation — gossip about the Player's reputation.
+        if world.tick > 0 and world.tick % TICK_PER_DAY == 0:
+            propagate_rumors(world, self._rng)
+
         return executed
 
     def _tick_agent(self, agent, world: World, snapshot: WorldSnapshot) -> object:
@@ -62,9 +111,9 @@ class AgentSociety:
         if isinstance(agent, RaiderFaction):
             _tick_raider_maintenance(agent, world)
 
-        # 2. If in transit — wait
-        if agent.travel_ticks_remaining > 0:
-            agent.travel_ticks_remaining -= 1
+        # 2. If in transit — advance one hex along travel_path
+        if agent.travel_ticks_remaining > 0 or agent.travel_path:
+            self._advance_travel(agent, world)
             action = NoAction(agent=agent)
             action.action_type = "transit"   # distinct from idle: agent is moving
             action._last_delta = {}

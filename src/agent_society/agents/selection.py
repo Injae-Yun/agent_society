@@ -20,6 +20,7 @@ from agent_society.agents.actions import (
     NoAction,
     ProduceAction,
     RaidAction,
+    RaidMerchantAction,
     SellAction,
     TradeAction,
     TravelAction,
@@ -331,21 +332,47 @@ def _select_merchant(agent: Agent, snapshot: WorldSnapshot, rng: Random) -> obje
 
 
 def _select_raider(agent: RaiderFaction, snapshot: WorldSnapshot, rng: Random) -> object:
-    """Raider always ambushes — eats only when starving, raids regardless of hunger.
+    """Raider always ambushes when possible.
 
-    Ambush probability scales with tile proximity to hideout (see hex_map.AMBUSH_PROB).
-    Risky route tiles are checked each tick; safe route tiles only when very hungry.
+    Two paths — both respect the raider's strength as an implicit difficulty:
+      * **Procedural hex raid** (preferred): scan every merchant on a road
+        tile with positive `raid_risk` and roll against that probability.
+        Targets the merchant directly (their inventory).
+      * **Legacy tile raid**: falls back to AMBUSH_PROB keyed route tiles
+        (mvp_scenario compatibility).
+
+    Eating and coming home unchanged — unfed raiders decay elsewhere.
     """
     hunger = agent.needs.get(NeedType.HUNGER, 0.0)
+    world = _snapshot_world(snapshot)
 
-    # 1. Check all risky route tiles — probability decreases with distance from hideout
+    # 1. Procedural hex-based raid — any merchant standing on a risky road.
+    if world is not None:
+        candidates: list[tuple[Agent, tuple[int, int], float]] = []
+        for a in world.agents.values():
+            if a.role != Role.MERCHANT or a.current_hex is None:
+                continue
+            tile = world.tiles.get(a.current_hex)
+            if tile is None or tile.raid_risk <= 0.0:
+                continue
+            candidates.append((a, a.current_hex, tile.raid_risk))
+        # Sort by risk desc — highest-probability victim checked first.
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        for merchant, hex_coord, risk in candidates:
+            if rng.random() < risk:
+                return RaidMerchantAction(
+                    raider=agent,
+                    target_agent_id=merchant.id,
+                    road_hex=hex_coord,
+                )
+
+    # 2. Legacy mvp scenario raid — AMBUSH_PROB on named route tiles.
     for tile_id in RISKY_ROUTE_IDS:
         prob = AMBUSH_PROB.get(tile_id, 0.0)
         merchants = [a for a in snapshot.agents_at(tile_id) if a.role == Role.MERCHANT]
         if merchants and rng.random() < prob:
             return RaidAction(raider=agent, target_node=tile_id)
 
-    # 1b. Desperate hunger — extend raids to safe route tiles nearest the hideout
     if hunger >= 0.8:
         for tile_id in SAFE_ROUTE_IDS:
             prob = AMBUSH_PROB.get(tile_id, 0.0)
@@ -355,7 +382,7 @@ def _select_raider(agent: RaiderFaction, snapshot: WorldSnapshot, rng: Random) -
             if merchants and rng.random() < prob:
                 return RaidAction(raider=agent, target_node=tile_id)
 
-    # 2. Eat only when very hungry (after raid opportunity checked)
+    # 3. Eat only when very hungry (after raid opportunity checked)
     if hunger > 0.6:
         if agent.current_node == RAIDER_HOME:
             node = snapshot.get_node(RAIDER_HOME)
@@ -366,9 +393,11 @@ def _select_raider(agent: RaiderFaction, snapshot: WorldSnapshot, rng: Random) -
             if agent.inventory.get(good, 0) > 0:
                 return ConsumeFoodAction(agent=agent, food_good=good, node_id=agent.current_node)
 
-    # 3. Return home if strayed outside territory
+    # 4. Return home if strayed outside territory
     if agent.current_node not in ({RAIDER_HOME} | RISKY_TILE_SET):
-        return TravelAction(agent=agent, target_node=RAIDER_HOME)
+        home = agent.home_node or RAIDER_HOME
+        if world is not None and home in world.nodes and agent.current_node != home:
+            return TravelAction(agent=agent, target_node=home)
 
     return NoAction(agent=agent)
 
@@ -380,16 +409,24 @@ _TRADEABLE_GOODS = ("wheat", "meat", "fruit", "ore", "cooked_meal")
 _TRADE_NODES = {CITY_NODE, FARM_NODE}
 
 
+def _is_trade_hub(world_ref, node_id: str) -> bool:
+    """True if `node_id` is a trade-affordance node in this world. Covers
+    both legacy mvp hubs (city/farm) and procedurally generated settlements."""
+    if node_id in _TRADE_NODES:
+        return True
+    node = world_ref.nodes.get(node_id) if world_ref is not None else None
+    return node is not None and "trade" in node.affordances
+
+
 def _merchant_market_action(
     agent: Agent,
     snapshot: WorldSnapshot,
 ) -> tuple[float, object] | None:
-    """Gold 기반 차익거래 — city/farm hub에서만 발동."""
-    if agent.current_node not in _TRADE_NODES:
-        return None
-
+    """Gold 기반 차익거래 — trade affordance가 있는 모든 허브에서 발동."""
     world = _snapshot_world(snapshot)
     if world is None:
+        return None
+    if not _is_trade_hub(world, agent.current_node):
         return None
 
     cur_node = world.nodes.get(agent.current_node)

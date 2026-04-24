@@ -21,67 +21,104 @@ FARM_TO_CITY_GOODS = {"wheat", "meat", "fruit", "ore"}
 
 
 def next_hop(agent: Agent, world: World) -> str | None:
-    """Return the next node the merchant should move to, or None to stay."""
+    """Return the next node the merchant should move to, or None to stay.
+
+    Uses `agent.travel_plan` to persist the merchant's ultimate hub target
+    across multiple hops. `travel_destination` tracks only the current hop's
+    target (a route tile or the hub), so arriving on a route tile doesn't
+    flip the plan back toward the origin.
+
+    Supports both the legacy mvp_scenario (hard-coded city/farm + route tiles)
+    and procedurally generated worlds (any node carrying the "trade" affordance
+    is a valid hub).
+    """
     cur = agent.current_node
 
-    # Already at destination → clear and decide new direction
-    if agent.travel_destination and cur == agent.travel_destination:
-        agent.travel_destination = None
+    # Reset plan when the merchant has reached its ultimate hub.
+    if agent.travel_plan and cur == agent.travel_plan:
+        agent.travel_plan = None
 
-    # If no destination, choose one
-    if agent.travel_destination is None:
-        agent.travel_destination = _choose_destination(agent)
+    # Pick a new hub if we aren't heading to one yet.
+    if agent.travel_plan is None:
+        agent.travel_plan = _choose_destination(agent, world)
 
-    if agent.travel_destination is None:
+    if agent.travel_plan is None or agent.travel_plan == cur:
         return None
 
-    return _route_aware_hop(agent, world, agent.travel_destination)
+    return _route_aware_hop(agent, world, agent.travel_plan)
 
 
-def _choose_destination(agent: Agent) -> str | None:
-    """Decide whether merchant heads to farm or city."""
+def _choose_destination(agent: Agent, world: World) -> str | None:
+    """Pick the merchant's next hub. Covers legacy + procedural worlds."""
     cur = agent.current_node
-    if cur == FARM_NODE:
-        return CITY_NODE
-    # From city, route tiles, or anywhere else default to farm.
-    return FARM_NODE
+
+    # Legacy mvp scenario — hard-wired city ↔ farm.
+    if CITY_NODE in world.nodes and FARM_NODE in world.nodes:
+        if cur == FARM_NODE:
+            return CITY_NODE
+        if cur == CITY_NODE:
+            return FARM_NODE
+        # On a route tile → continue toward whichever hub the agent's home
+        # ISN'T (merchants default to "visit the other hub").
+        if agent.home_node == FARM_NODE:
+            return CITY_NODE
+        return FARM_NODE
+
+    # Procedural: bounce between home and a partner hub. Partner is stable
+    # per merchant (hash(agent.id) mod N) so routes stay predictable.
+    home = agent.home_node
+    trade_hubs = [
+        nid for nid, n in world.nodes.items()
+        if "trade" in n.affordances and nid != home
+    ]
+    if not trade_hubs:
+        return None
+    if cur == home:
+        # Head out to the designated partner.
+        partner = trade_hubs[abs(hash(agent.id)) % len(trade_hubs)]
+        return partner
+    # Elsewhere → come home.
+    return home
 
 
 def _route_aware_hop(agent: Agent, world: World, destination: str) -> str | None:
-    """Next hop with explicit safe/risky route selection.
+    """Next hop toward `destination`.
 
-    Route choice is made when entering from city or farm. Once on a route,
-    continue along it to the far end. Armed merchants prefer the risky route;
-    unarmed prefer safe.
+    Legacy mvp_scenario path: explicit safe/risky route selection (armed
+    merchants prefer risky). Procedural world path: the destination itself
+    is the next hop — TravelAction computes the full A* hex path, and the
+    merchant walks it.
     """
     cur = agent.current_node
     armed = should_use_risky_route(agent)
 
-    # ── City → Farm: enter a route from the city side ────────────────────────
-    if cur == CITY_NODE and destination == FARM_NODE:
-        return RISKY_ROUTE_IDS[0] if armed else SAFE_ROUTE_IDS[0]
+    legacy_layout = CITY_NODE in world.nodes and FARM_NODE in world.nodes
+    if legacy_layout:
+        # City → Farm: enter a route from the city side
+        if cur == CITY_NODE and destination == FARM_NODE:
+            return RISKY_ROUTE_IDS[0] if armed else SAFE_ROUTE_IDS[0]
+        # Farm → City: enter a route from the far end
+        if cur == FARM_NODE and destination == CITY_NODE:
+            return RISKY_ROUTE_IDS[-1] if armed else SAFE_ROUTE_IDS[-1]
+        # On safe route → next safe tile
+        if cur in SAFE_TILE_SET:
+            idx = SAFE_ROUTE_IDS.index(cur)
+            if destination == FARM_NODE:
+                return SAFE_ROUTE_IDS[idx + 1] if idx + 1 < len(SAFE_ROUTE_IDS) else FARM_NODE
+            if destination == CITY_NODE:
+                return SAFE_ROUTE_IDS[idx - 1] if idx > 0 else CITY_NODE
+        # On risky route → next risky tile
+        if cur in RISKY_TILE_SET:
+            idx = RISKY_ROUTE_IDS.index(cur)
+            if destination == FARM_NODE:
+                return RISKY_ROUTE_IDS[idx + 1] if idx + 1 < len(RISKY_ROUTE_IDS) else FARM_NODE
+            if destination == CITY_NODE:
+                return RISKY_ROUTE_IDS[idx - 1] if idx > 0 else CITY_NODE
 
-    # ── Farm → City: enter a route from the far end ──────────────────────────
-    if cur == FARM_NODE and destination == CITY_NODE:
-        return RISKY_ROUTE_IDS[-1] if armed else SAFE_ROUTE_IDS[-1]
-
-    # ── On safe route ────────────────────────────────────────────────────────
-    if cur in SAFE_TILE_SET:
-        idx = SAFE_ROUTE_IDS.index(cur)
-        if destination == FARM_NODE:
-            return SAFE_ROUTE_IDS[idx + 1] if idx + 1 < len(SAFE_ROUTE_IDS) else FARM_NODE
-        if destination == CITY_NODE:
-            return SAFE_ROUTE_IDS[idx - 1] if idx > 0 else CITY_NODE
-
-    # ── On risky route ───────────────────────────────────────────────────────
-    if cur in RISKY_TILE_SET:
-        idx = RISKY_ROUTE_IDS.index(cur)
-        if destination == FARM_NODE:
-            return RISKY_ROUTE_IDS[idx + 1] if idx + 1 < len(RISKY_ROUTE_IDS) else FARM_NODE
-        if destination == CITY_NODE:
-            return RISKY_ROUTE_IDS[idx - 1] if idx > 0 else CITY_NODE
-
-    # ── Fallback: BFS ────────────────────────────────────────────────────────
+    # Procedural worlds (or legacy fallback): the destination node itself is
+    # the hop target; TravelAction's A* figures out the hex route.
+    if destination in world.nodes:
+        return destination
     return _next_hop_toward(agent, world, destination)
 
 

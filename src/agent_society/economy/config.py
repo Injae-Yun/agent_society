@@ -79,6 +79,10 @@ class EconomyConfig:   # not frozen — builder may re-tune at world constructio
     gold_tax_threshold: int = 2000
     gold_tax_rate: float = 0.20
 
+    # ── M7 — world / visibility ───────────────────────────────────────────────
+    fog_of_war_enabled: bool = False   # when True, Player can only see known_tiles
+    vision_radius_hex: int = 2         # how many hexes agents reveal around them
+
 
 CONFIG = EconomyConfig()
 
